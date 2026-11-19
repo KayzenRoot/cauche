@@ -1,7 +1,7 @@
 import { lazy, StrictMode, Suspense, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { createRoot } from 'react-dom/client'
-import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { BrowserRouter, Link, NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { MotionConfig, motion } from 'motion/react'
 import {
@@ -176,6 +176,9 @@ function Workspace({ session }: {session: Session}) {
             {accountOpen && <div className="account-popover">
               <strong>{session.email}</strong>
               <span>{admin ? 'Administrador' : 'Proprietário'}</span>
+              {admin && <Link className="button" to="/admin/conexoes" onClick={() => setAccountOpen(false)}>
+                <Settings2 size={15} aria-hidden="true" /> Configurações da conta
+              </Link>}
               <button type="button" onClick={() => logout.mutate()} disabled={logout.isPending}><LogOut size={15} aria-hidden="true" /> Sair</button>
               {logout.isError && <Problem error={logout.error} />}
             </div>}

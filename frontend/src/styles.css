@@ -160,6 +160,7 @@
   }
   .account-popover strong { overflow-wrap: anywhere; font-size: 13px; }
   .account-popover > span { color: var(--muted); font-size: 12px; }
+  .account-popover > .button,
   .account-popover > button { justify-content: flex-start; margin-top: 6px; }
   .content { width: min(100%, 1780px); margin: 0 auto; padding: 26px clamp(15px,2.5vw,34px) 24px; flex: 1; }
   .content:focus { outline: none; }

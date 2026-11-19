@@ -11,7 +11,7 @@ import { Badge, DataTable, Empty, Feed, Loading, PageTitle, Problem, Status } fr
 import { ConfirmDialog } from '../components/confirm'
 import type { Confirmation } from '../components/confirm'
 import { ParameterFields } from '../components/parameters'
-import { dateTime, exchangeNames, field, localText, number, relativeTime, strategyName } from '../format'
+import { dateTime, exchangeNames, field, localText, money, number, relativeTime, strategyName } from '../format'
 import type { Connection, EventsPage, Exchange, List, Overview, RecordData, RiskConfig, Scalar, Scope, Session, Strategy } from '../types'
 import { HistoryPage, LogsPage } from './records'
 
@@ -26,7 +26,7 @@ const nav = [
   { to: 'seguranca', label: 'Segurança', Icon: LockKeyhole },
 ]
 
-const adminKeys = ['admin-overview', 'admin-connections', 'admin-audit', 'admin-risk', 'admin-sessions', 'strategies', 'dashboard']
+const adminKeys = ['admin-overview', 'admin-connections', 'admin-real-connections', 'admin-audit', 'admin-risk', 'admin-sessions', 'strategies', 'dashboard']
 function useRefreshAdmin() {
   const client = useQueryClient()
   return () => {
@@ -82,18 +82,50 @@ function OverviewPage({ system = false }: {system?: boolean}) {
   </>
 }
 
-const credentials = {
-  DERIV: [{ id: 'app_id', label: 'ID do aplicativo' }, { id: 'token', label: 'Token demo', secret: true },
-    { id: 'account_id', label: 'ID da conta demo (opcional)', optional: true }],
-  KALSHI: [{ id: 'key_id', label: 'ID da chave demo' }, { id: 'private_key', label: 'Chave privada PEM', secret: true, multiline: true }],
+type AccountEnvironment = Connection['environment']
+
+const accountEnvironments = {
+  BROKER_DEMO: { label: 'Demo oficial', path: '/admin/connections', queryKey: 'admin-connections' },
+  REAL_READ_ONLY: { label: 'Conta real · somente leitura', path: '/admin/real-connections', queryKey: 'admin-real-connections' },
+} satisfies Record<AccountEnvironment, {label: string; path: string; queryKey: string}>
+
+interface CredentialField {
+  id: string
+  label: string
+  secret?: boolean
+  optional?: boolean
+  multiline?: boolean
 }
 
-function ConnectionForm({ exchange, connection, session }: {exchange: Exchange; connection?: Connection; session: Session}) {
+function credentialFields(exchange: Exchange, isReal: boolean): CredentialField[] {
+  if (exchange === 'DERIV') return [
+    { id: 'app_id', label: 'ID do aplicativo' },
+    { id: 'token', label: isReal ? 'Token da conta real' : 'Token demo', secret: true },
+    { id: 'account_id', label: isReal ? 'ID da conta real' : 'ID da conta demo (opcional)', optional: !isReal },
+  ]
+  return [
+    { id: 'key_id', label: isReal ? 'ID da chave da conta real' : 'ID da chave demo' },
+    { id: 'private_key', label: 'Chave privada PEM', secret: true, multiline: true },
+  ]
+}
+
+function ConnectionForm({ environment, exchange, connection, session }: {
+  environment: AccountEnvironment; exchange: Exchange; connection?: Connection; session: Session;
+}) {
   const [draft, setDraft] = useState<Record<string, string>>({})
   const [enabled, setEnabled] = useState<boolean>()
   const [confirm, setConfirm] = useState<Confirmation>()
   const refresh = useRefreshAdmin()
-  const path = '/admin/connections/' + exchange
+  const environmentConfig = accountEnvironments[environment]
+  const path = environmentConfig.path + '/' + exchange
+  const isReal = environment === 'REAL_READ_ONLY'
+  const accountLabel = isReal ? 'da conta real' : 'da demo'
+  const capabilities = Array.isArray(connection?.capabilities) ? undefined : connection?.capabilities
+  const currency = capabilities?.currency
+  const reportedBalance = isReal ? connection?.balance : capabilities?.demo_balance
+  const balance = typeof reportedBalance === 'string' || typeof reportedBalance === 'number' ? reportedBalance : undefined
+  const observedCurrency = typeof currency === 'string' && /^[A-Z]{3}$/.test(currency) ? currency : undefined
+  const formattedBalance = observedCurrency ? money(balance, observedCurrency) : number(balance, 6)
   const active = enabled ?? connection?.enabled ?? true
   const action = useMutation({
     mutationFn: (kind: 'save' | 'remove' | 'test') => {
@@ -110,28 +142,33 @@ function ConnectionForm({ exchange, connection, session }: {exchange: Exchange; 
     },
   })
   const ask = (kind: 'save' | 'remove' | 'test') => setConfirm({
-    title: kind === 'remove' ? 'Desconectar demo?' : kind === 'test' ? 'Testar conexão demo?' : 'Salvar credenciais demo?',
-    description: kind === 'remove' ? 'As credenciais armazenadas para esta corretora serão removidas.'
-      : kind === 'test' ? 'O servidor fará uma verificação autenticada no ambiente oficial de demonstração.'
-      : 'O servidor armazenará as credenciais para esta corretora no ambiente de demonstração.',
+    title: kind === 'remove' ? (isReal ? 'Desconectar a conta real?' : 'Desconectar a demo?')
+      : kind === 'test' ? `Testar conexão ${accountLabel}?` : `Salvar credenciais ${accountLabel}?`,
+    description: kind === 'remove' ? `As credenciais deste ambiente serão removidas para a ${exchangeNames[exchange]}.`
+      : kind === 'test' ? `O servidor fará uma consulta autenticada ${isReal ? 'na conta real' : 'na demo'} da ${exchangeNames[exchange]}.`
+      : `O servidor armazenará de forma criptografada as credenciais deste ambiente para a ${exchangeNames[exchange]}.`,
     destructive: kind === 'remove',
     confirm: () => action.mutate(kind),
   })
   return <form className="panel" autoComplete="off" onSubmit={event => { event.preventDefault(); ask('save') }}>
     <div className="panel-heading">
       <div className="section-name"><span className="panel-icon"><Plug size={19} aria-hidden="true" /></span>
-        <div><h2>{exchangeNames[exchange]}</h2><p>Demo oficial · {connection?.configured ? 'Credenciais protegidas' : 'Sem credenciais'}</p></div>
+        <div><h2>{exchangeNames[exchange]}</h2><p>{environmentConfig.label} · {connection?.configured ? 'Credenciais protegidas' : 'Sem credenciais'}</p></div>
       </div>
       <Status state={connection?.status ?? 'NOT_CONFIGURED'} />
     </div>
     <div className="form-body">
       <p className="hint">Última sincronização <time>{dateTime(connection?.last_sync)}</time></p>
-      {connection?.capabilities && (Array.isArray(connection.capabilities) ? connection.capabilities.length > 0 : Object.keys(connection.capabilities).length > 0) &&
+      {balance !== undefined && <div className="setting-row">
+        <strong>{isReal ? 'Saldo real observado' : 'Saldo demo observado'}</strong>
+        <span>{formattedBalance}{observedCurrency && ` ${observedCurrency}`}</span>
+      </div>}
+      {!isReal && connection?.capabilities && (Array.isArray(connection.capabilities) ? connection.capabilities.length > 0 : Object.keys(connection.capabilities).length > 0) &&
         <details className="form-details"><summary>Recursos disponíveis</summary><pre>{JSON.stringify(connection.capabilities, null, 2)}</pre></details>}
-      {credentials[exchange].map(item => <label key={item.id}><span>{item.label}</span>
-        {('multiline' in item && item.multiline) ? <textarea rows={4} spellCheck={false} autoComplete="off" className="secret-key" required
+      {credentialFields(exchange, isReal).map(item => <label key={item.id}><span>{item.label}</span>
+        {item.multiline ? <textarea rows={4} spellCheck={false} autoComplete="off" className="secret-key" required
           value={draft[item.id] ?? ''} onChange={event => setDraft(previous => ({ ...previous, [item.id]: event.target.value }))} />
-          : <input type={item.secret ? 'password' : 'text'} required={!('optional' in item && item.optional)}
+          : <input type={item.secret ? 'password' : 'text'} required={!item.optional}
             value={draft[item.id] ?? ''} autoComplete={item.secret ? 'new-password' : 'off'}
             onChange={event => setDraft(previous => ({ ...previous, [item.id]: event.target.value }))} />}
       </label>)}
@@ -150,15 +187,29 @@ function ConnectionForm({ exchange, connection, session }: {exchange: Exchange; 
 }
 
 function ConnectionsPage({ session }: {session: Session}) {
+  const [environment, setEnvironment] = useState<AccountEnvironment>('BROKER_DEMO')
+  const config = accountEnvironments[environment]
   const connections = useQuery({
-    queryKey: ['admin-connections'],
-    queryFn: ({ signal }) => api<List<Connection>>('/admin/connections', { signal }),
+    queryKey: [config.queryKey],
+    queryFn: ({ signal }) => api<List<Connection>>(config.path, { signal }),
   })
   return <>
-    <PageTitle title="Conexões" description="Gerencie credenciais separadas para os ambientes oficiais de demonstração." />
+    <PageTitle title="Conexões" />
+    <section className="panel setting-banner" aria-label="Configuração por ambiente">
+      <div>
+        <h2>Ambiente da conta</h2>
+        <p>{environment === 'REAL_READ_ONLY' ? 'Consulte o saldo da conta real com acesso de leitura.' : 'Gerencie as credenciais usadas para operar em demonstração.'}</p>
+      </div>
+      <div className="segmented" role="group" aria-label="Selecionar ambiente">
+        {(Object.keys(accountEnvironments) as AccountEnvironment[]).map(option =>
+          <button key={option} type="button" aria-pressed={environment === option} onClick={() => setEnvironment(option)}>
+            {accountEnvironments[option].label}
+          </button>)}
+      </div>
+    </section>
     {connections.isPending ? <Loading /> : connections.isError ? <Problem error={connections.error} retry={() => void connections.refetch()} />
       : <div className="split-grid">
-        {(['DERIV', 'KALSHI'] as const).map(exchange => <ConnectionForm key={exchange} exchange={exchange}
+        {(['DERIV', 'KALSHI'] as const).map(exchange => <ConnectionForm key={environment + exchange} environment={environment} exchange={exchange}
           session={session} connection={connections.data?.items.find(item => item.exchange === exchange)} />)}
       </div>}
   </>

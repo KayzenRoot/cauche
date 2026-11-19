@@ -124,12 +124,13 @@ export interface Instrument {
 
 export interface Connection {
   exchange: Exchange
-  environment: 'BROKER_DEMO'
+  environment: 'BROKER_DEMO' | 'REAL_READ_ONLY'
   status: string
   enabled: boolean
   last_sync: string | null
   capabilities: string[] | RecordData
   configured: boolean
+  balance?: string | null
 }
 
 export interface Dashboard {

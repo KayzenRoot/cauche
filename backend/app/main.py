@@ -30,7 +30,10 @@ from .commands import (
 from .config import APP_ORIGIN, COOKIE_NAME, LOG_RETENTION_DAYS, SECURE_COOKIE
 from .db import SessionLocal, aware, lock, utcnow
 from .events import audit
-from .models import AuditEvent, BacktestResult, BacktestRun, RiskViolation, StrategyConfig, SystemEvent, User
+from .models import (
+    AuditEvent, BacktestResult, BacktestRun, RealAccountConnection,
+    RiskViolation, StrategyConfig, SystemEvent, User,
+)
 from .models import Session as StoredSession
 from .queries import (
     Filters, connection, connections, dashboard, event_page, filters, history, instruments, market,
@@ -535,6 +538,119 @@ async def test_connection(exchange: Exchange, _payload: Confirm, owner: AdminWri
         broker_status = "DISCONNECTED"
     return await asyncio.to_thread(
         apply_connection_test, exchange, ciphertext, broker_status, result, owner.id,
+    )
+
+
+def real_account(db: Session, exchange: str, *, locked: bool = False) -> RealAccountConnection:
+    query = select(RealAccountConnection).where(RealAccountConnection.exchange == exchange)
+    if locked:
+        query = query.with_for_update()
+    row = db.scalar(query)
+    if row is None:
+        raise HTTPException(503, "MIGRATE_DATABASE")
+    return row
+
+
+def real_connection_payload(row: RealAccountConnection) -> dict:
+    return {
+        "exchange": row.exchange,
+        "environment": "REAL_READ_ONLY",
+        "configured": bool(row.ciphertext),
+        "enabled": row.enabled,
+        "status": row.status,
+        "last_sync": jsonable(row.last_sync),
+        "balance": jsonable(row.balance),
+        "capabilities": {"currency": row.currency} if row.currency else {},
+    }
+
+
+def set_real_connection(
+    db: Session, exchange: str, owner_id: int, ciphertext: str | None, *, enabled: bool,
+) -> dict:
+    row = real_account(db, exchange, locked=True)
+    row.ciphertext = ciphertext
+    row.enabled = enabled
+    row.status = ("UNVERIFIED" if enabled else "DISABLED") if ciphertext else "NOT_CONFIGURED"
+    row.last_sync, row.balance, row.currency = None, None, None
+    audit(db, "ADMIN", "REAL_CONNECTION_UPDATED", "Configuração de consulta real alterada.",
+          user_id=owner_id, context={"exchange": exchange, "status": row.status})
+    db.commit()
+    return real_connection_payload(row)
+
+
+@app.get("/api/admin/real-connections")
+def list_real_connections(db: Db, _owner: Admin):
+    return {"items": [real_connection_payload(row) for row in db.scalars(
+        select(RealAccountConnection).order_by(RealAccountConnection.exchange),
+    )]}
+
+
+@app.put("/api/admin/real-connections/{exchange}")
+def update_real_connection(exchange: Exchange, payload: ConnectionUpdate, db: Db, owner: AdminWrite):
+    credentials = checked_credentials(exchange, payload.credentials)
+    if exchange == "DERIV" and not credentials.get("account_id"):
+        raise HTTPException(422, "INVALID_CREDENTIAL_FIELDS")
+    try:
+        ciphertext = encrypt_credentials(credentials)
+    except ValueError as exc:
+        raise HTTPException(409, "MASTER_KEY_NOT_CONFIGURED") from exc
+    return set_real_connection(db, exchange, owner.id, ciphertext, enabled=payload.enabled)
+
+
+@app.delete("/api/admin/real-connections/{exchange}")
+def remove_real_connection(exchange: Exchange, db: Db, owner: AdminWrite, confirm: bool = False):
+    if not confirm:
+        raise HTTPException(422, "CONFIRMATION_REQUIRED")
+    return set_real_connection(db, exchange, owner.id, None, enabled=False)
+
+
+def real_account_config(exchange: str) -> tuple[str, dict]:
+    with SessionLocal() as db:
+        row = real_account(db, exchange)
+        if not row.enabled or not row.ciphertext:
+            raise HTTPException(409, "BROKER_NOT_CONFIGURED")
+        try:
+            return row.ciphertext, decrypt_credentials(row.ciphertext)
+        except ValueError as exc:
+            raise HTTPException(409, "CREDENTIALS_UNAVAILABLE") from exc
+
+
+def apply_real_account_check(
+    exchange: str, ciphertext: str, broker_status: str,
+    observed: tuple[str, Decimal] | None, owner_id: int,
+) -> dict:
+    with SessionLocal.begin() as db:
+        row = real_account(db, exchange, locked=True)
+        if not row.enabled or row.ciphertext != ciphertext:
+            raise HTTPException(409, "CONNECTION_CHANGED")
+        row.status = broker_status
+        row.currency, row.balance = observed if observed else (None, None)
+        row.last_sync = utcnow() if observed else None
+        audit(db, "ADMIN", "REAL_CONNECTION_TESTED", "Consulta à conta real registrada.",
+              user_id=owner_id, context={"exchange": exchange, "status": broker_status})
+        return real_connection_payload(row)
+
+
+@app.post("/api/admin/real-connections/{exchange}/test")
+async def test_real_connection(exchange: Exchange, _payload: Confirm, owner: AdminWrite):
+    from .integrations import VenueError
+    from .integrations.real_accounts import DerivRealReader, KalshiRealReader
+
+    ciphertext, credentials = await asyncio.to_thread(real_account_config, exchange)
+    constructor = DerivRealReader if exchange == "DERIV" else KalshiRealReader
+    try:
+        async with asyncio.timeout(15):
+            observed = await constructor(**credentials).verify()
+        broker_status = "CONNECTED"
+    except VenueError as exc:
+        observed = None
+        broker_status = "DISCONNECTED" if exc.retryable else "AUTH_ERROR"
+    except (TimeoutError, OSError, httpx.HTTPError):
+        observed, broker_status = None, "DISCONNECTED"
+    except (ValueError, TypeError):
+        observed, broker_status = None, "AUTH_ERROR"
+    return await asyncio.to_thread(
+        apply_real_account_check, exchange, ciphertext, broker_status, observed, owner.id,
     )
 
 

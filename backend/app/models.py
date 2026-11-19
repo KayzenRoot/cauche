@@ -75,6 +75,23 @@ class ExchangeConnection(Base):
     capabilities: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
+class RealAccountConnection(Base):
+    """Owner-configured balance lookup, isolated from all executable connections."""
+
+    __tablename__ = "real_account_connections"
+    __table_args__ = (
+        CheckConstraint("exchange IN ('DERIV','KALSHI')", name="real_account_exchange"),
+    )
+
+    exchange: Mapped[str] = mapped_column(String(10), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), default="NOT_CONFIGURED")
+    enabled: Mapped[bool] = mapped_column(default=False)
+    ciphertext: Mapped[str | None] = mapped_column(Text)
+    last_sync: Mapped[datetime | None] = mapped_column(DATE)
+    currency: Mapped[str | None] = mapped_column(String(20))
+    balance: Mapped[Decimal | None] = mapped_column(Numeric(32, 16))
+
+
 class StrategyConfig(Base):
     __tablename__ = "strategy_configs"
 

@@ -59,6 +59,25 @@ _KNOWN_REJECTIONS = {
 }
 
 
+def account_headers(app_id: str | None, token: str | None) -> dict[str, str]:
+    if not app_id or not token:
+        raise VenueError("NOT_CONFIGURED")
+    if (
+        re.fullmatch(r"[A-Za-z0-9_-]{1,100}", app_id) is None
+        or re.fullmatch(r"[\x21-\x7e]{1,4096}", token) is None
+    ):
+        raise VenueError("AUTH_ERROR")
+    return {"Deriv-App-ID": app_id, "Authorization": f"Bearer {token}"}
+
+
+async def read_option_accounts(auth, transport=None) -> list:
+    payload = await request_json(
+        "GET", _ACCOUNTS, auth=auth, transport=transport,
+        pace_seconds=1, pace_bucket=_ACCOUNT_BUCKET,
+    )
+    return array(payload.get("data"))
+
+
 class Deriv:
     def __init__(
         self,
@@ -77,14 +96,7 @@ class Deriv:
         self._request_ids = itertools.count(1)
 
     def _headers(self) -> dict[str, str]:
-        if not self._app_id or not self._token:
-            raise VenueError("NOT_CONFIGURED")
-        if (
-            re.fullmatch(r"[A-Za-z0-9_-]{1,100}", self._app_id) is None
-            or re.fullmatch(r"[\x21-\x7e]{1,4096}", self._token) is None
-        ):
-            raise VenueError("AUTH_ERROR")
-        return {"Deriv-App-ID": self._app_id, "Authorization": f"Bearer {self._token}"}
+        return account_headers(self._app_id, self._token)
 
     @staticmethod
     def _demo_url(raw: Any) -> str:
@@ -109,16 +121,8 @@ class Deriv:
 
     async def _demo_target(self) -> tuple[str, dict]:
         selected = identifier(self._account_id) if self._account_id else None
-        payload = await request_json(
-            "GET",
-            _ACCOUNTS,
-            auth=self._headers,
-            transport=self._transport,
-            pace_seconds=1,
-            pace_bucket=_ACCOUNT_BUCKET,
-        )
         eligible = []
-        for raw in array(payload.get("data")):
+        for raw in await read_option_accounts(self._headers, self._transport):
             entry = object_(raw)
             if entry.get("account_type") != "demo" or entry.get("status") != "active":
                 continue

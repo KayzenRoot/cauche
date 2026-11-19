@@ -43,35 +43,15 @@ _CENTICENT = Decimal("0.0001")
 _OPEN_STATUS = {"active", "open"}
 
 
-class Kalshi:
-    def __init__(
-        self,
-        key_id: str | None = None,
-        private_key: str | None = None,
-        *,
-        public: bool = False,
-        _transport: httpx.AsyncBaseTransport | None = None,
-        _connect: Callable[..., Any] = NoRedirectConnect,
-    ) -> None:
+class KalshiSigner:
+    def __init__(self, key_id: str | None, private_key: str | None) -> None:
         self._key_id = key_id
         self._private_key = private_key
         self._signer: rsa.RSAPrivateKey | ed25519.Ed25519PrivateKey | None = None
-        self._public = public
-        self._transport = _transport
-        self._connect = _connect
 
-    @property
-    def source(self) -> str:
-        return "KALSHI_PUBLIC" if self._public else "KALSHI_DEMO"
-
-    def _require_demo(self) -> None:
-        if self._public:
-            raise VenueError("DEMO_DESTINATION_BLOCKED")
+    def headers(self, method: str, path: str) -> dict[str, str]:
         if not self._key_id or not self._private_key:
             raise VenueError("NOT_CONFIGURED")
-
-    def _headers(self, method: str, path: str) -> dict[str, str]:
-        self._require_demo()
         key_id = identifier(self._key_id or "")
         if self._signer is None:
             try:
@@ -100,6 +80,37 @@ class Kalshi:
             "KALSHI-ACCESS-TIMESTAMP": timestamp,
             "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode("ascii"),
         }
+
+class Kalshi:
+    def __init__(
+        self,
+        key_id: str | None = None,
+        private_key: str | None = None,
+        *,
+        public: bool = False,
+        _transport: httpx.AsyncBaseTransport | None = None,
+        _connect: Callable[..., Any] = NoRedirectConnect,
+    ) -> None:
+        self._key_id = key_id
+        self._private_key = private_key
+        self._auth = KalshiSigner(key_id, private_key)
+        self._public = public
+        self._transport = _transport
+        self._connect = _connect
+
+    @property
+    def source(self) -> str:
+        return "KALSHI_PUBLIC" if self._public else "KALSHI_DEMO"
+
+    def _require_demo(self) -> None:
+        if self._public:
+            raise VenueError("DEMO_DESTINATION_BLOCKED")
+        if not self._key_id or not self._private_key:
+            raise VenueError("NOT_CONFIGURED")
+
+    def _headers(self, method: str, path: str) -> dict[str, str]:
+        self._require_demo()
+        return self._auth.headers(method, path)
 
     async def _read(
         self, path: str, *, params: dict | None = None, auth: bool = False

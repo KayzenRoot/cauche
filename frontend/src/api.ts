@@ -13,7 +13,7 @@ const errors: Record<string, string> = {
   NOT_AUTHENTICATED: 'Sua sessão expirou. Entre novamente.',
   UNAUTHENTICATED: 'Sua sessão expirou. Entre novamente.',
   INVALID_CREDENTIALS: 'E-mail ou senha incorretos.',
-  AUTH_ERROR: 'A corretora rejeitou a autenticação de demonstração.',
+  AUTH_ERROR: 'A corretora rejeitou a autenticação.',
   NOT_CONFIGURED: 'Configure as credenciais demo na administração.',
   STRATEGY_DISABLED: 'Ative a estratégia na administração antes de iniciar.',
   KILL_SWITCH: 'O bloqueio global está ativado.',
