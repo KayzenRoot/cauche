@@ -1,9 +1,9 @@
 # Context Lock
 
-- Repository: KayzenRoot/cauche (public).
-- Source check: 2026-11-19 America/Sao_Paulo.
-- Remote base: unborn, no default branch and no refs reported by git ls-remote.
-- Prior code/commit/checkpoint: none.
-- Bootstrap: main starts at the commit introducing this Source Pack. The development branch codex/cau-mvp-001 is created from that exact commit. See the evidence bundle for the resolved SHA.
-- Governing source: owner-provided CAU-MVP-001 master Work Order.
-- Approved modes: REPLAY, PAPER, BROKER_DEMO. No live-money execution.
+- Repository KayzenRoot/cauche, public.
+- Source check 2026-11-19 America/Sao_Paulo.
+- Remote before bootstrap unborn, with no refs or default branch.
+- Main and exact branch base a8e69195192a0abda82298927f0b0f231a86ea7b, the documentation-only initial Source Pack commit.
+- Delivery branch codex/cau-mvp-001.
+- Governing source owner-provided CAU-MVP-001 master Work Order.
+- Approved modes REPLAY, PAPER and BROKER_DEMO. Only official demo destinations can receive broker order writes.

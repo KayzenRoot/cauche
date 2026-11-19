@@ -51,6 +51,22 @@ function equity(test?: Backtest) {
   })
 }
 
+function recordData(value: unknown): RecordData {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as RecordData : {}
+}
+
+function validationRows(test: Backtest) {
+  const partitions = recordData(test.result?.temporal_partitions)
+  const rows: RecordData[] = [
+    ['train', 'Treino'], ['validation', 'Validação'], ['test', 'Teste fora da amostra'],
+  ].filter(([key]) => key in partitions).map(([key, label]) => ({
+    label, ...recordData(partitions[key]),
+  }))
+  const sensitivity = recordData(test.result?.slippage_sensitivity)
+  if (sensitivity.metrics) rows.push({ label: 'Sensibilidade a slippage', metrics: sensitivity.metrics })
+  return rows
+}
+
 export function BacktestsPage({ session, strategies }: {session: Session; strategies: Strategy[]}) {
   const client = useQueryClient()
   const [scope, setScope] = useState<Scope>({ exchange: 'DERIV', mode: 'REPLAY', strategy: '', instrument: 'EUR/USD', start: '', end: '' })
@@ -95,14 +111,16 @@ export function BacktestsPage({ session, strategies }: {session: Session; strate
             if (scope.strategy !== next.strategy) setParameterDraft({})
             setScope(next)
           }} />
-          <label><span>Saldo virtual inicial (USD)</span><input required type="number" min="1" step="0.01" value={balance} onChange={event => setBalance(event.target.value)} /></label>
+          <label><span>Saldo virtual inicial (USD)</span><input required type="number" min="1" max="1000000" step="0.01" value={balance} onChange={event => setBalance(event.target.value)} /></label>
           {strategy && <details className="form-details">
             <summary>Parâmetros da estratégia</summary>
             <ParameterFields values={{ ...strategy.parameters, ...parameterDraft }} definitions={strategy.parameter_schema} update={(key, value) => setParameterDraft(previous => ({ ...previous, [key]: value }))} />
           </details>}
           <details className="form-details">
             <summary>Custos e gerenciamento de risco</summary>
-            <ParameterFields values={{ fee_rate: '0', slippage: '0', ...costs }} update={(key, value) => setCosts(previous => ({ ...previous, [key]: value }))} />
+            <ParameterFields values={{ fee_rate: '0', slippage: '0', ...costs }}
+              definitions={{ fee_rate: { type: 'decimal', minimum: '0', maximum: '0.5' }, slippage: { type: 'decimal', minimum: '0', maximum: '0.5' } }}
+              update={(key, value) => setCosts(previous => ({ ...previous, [key]: value }))} />
             <label><span>Exposição máxima por ordem (USD)</span>
               <input type="number" step="0.01" min="0.01" placeholder="Limite padrão" value={String(risk.max_order_exposure ?? '')}
                 onChange={event => setRisk(event.target.value ? { max_order_exposure: event.target.value } : {})} />
@@ -139,9 +157,15 @@ export function BacktestsPage({ session, strategies }: {session: Session; strate
               ...(comparison ? [{ key: 'prior', label: 'Comparativo', value: (row: RecordData) => valueText(row.prior), numeric: true }] : []),
             ]} />
             {chart.length > 0 && <EquityGraph points={chart} />}
-            {Object.keys(result.result ?? {}).some(key => /split|walk|test|slippage|calibration/.test(key)) && <details className="form-body form-details">
+            {validationRows(result).length > 0 && <details className="form-body form-details">
               <summary>Validação temporal e sensibilidade</summary>
-              <pre>{JSON.stringify(Object.fromEntries(Object.entries(result.result ?? {}).filter(([key]) => /split|walk|test|slippage|calibration/.test(key))), null, 2)}</pre>
+              <DataTable title="Partições e sensibilidade" empty="Sem resultados temporais" rows={validationRows(result)}
+                columns={[
+                  { key: 'part', label: 'Partição', value: row => valueText(row.label) },
+                  { key: 'count', label: 'Observações', value: row => number(scalar(row.observations) as string, 0), numeric: true },
+                  { key: 'net', label: 'Resultado líquido', value: row => money(resultValue(recordData(row.metrics), 'net_pnl')), numeric: true },
+                  { key: 'roi', label: 'ROI', value: row => percent(resultValue(recordData(row.metrics), 'roi')), numeric: true },
+                ]} />
             </details>}
           </>}
       </section>
