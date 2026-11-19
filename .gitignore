@@ -18,3 +18,4 @@ test-results/
 .DS_Store
 coverage.json
 *.tsbuildinfo
+/.wrangler/
