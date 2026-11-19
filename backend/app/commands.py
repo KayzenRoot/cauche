@@ -108,6 +108,8 @@ def validate_launch(session: Session, payload: Launch) -> StrategyConfig:
 
 
 def start_bot(session: Session, payload: Launch, owner_id: int) -> dict:
+    from .domain import validate_parameters
+
     bot = bot_row(session, locked=True)
     if bot.state not in STABLE_START or bot.desired_state != "STOPPED":
         raise HTTPException(409, "INVALID_BOT_TRANSITION")
@@ -116,7 +118,7 @@ def start_bot(session: Session, payload: Launch, owner_id: int) -> dict:
     run = StrategyRun(
         mode=payload.mode, exchange=payload.exchange, instrument=payload.instrument,
         strategy=payload.strategy, state="STARTING",
-        strategy_version=config.version, parameters=config.parameters, timestamp=now,
+        strategy_version=config.version, parameters=jsonable(validate_parameters(config.id, config.parameters)), timestamp=now,
     )
     session.add(run)
     session.flush()

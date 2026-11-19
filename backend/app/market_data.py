@@ -59,8 +59,8 @@ async def deriv_observation(instrument: str, parameters: dict) -> Market:
         venue.candles(native, 300, 110),
         venue.candles(native, 900, 90),
     )
-    stake = Decimal(str(parameters.get("stake", "2")))
-    duration = int(parameters.get("duration_seconds", 300))
+    stake = Decimal(str(parameters["stake"]))
+    duration = int(parameters["duration_seconds"])
     quotes = []
     if duration >= 60 and duration % 60 == 0:
         for side in ("CALL", "PUT"):

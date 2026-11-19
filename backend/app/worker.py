@@ -11,7 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from .config import LOG_RETENTION_DAYS
 from .db import SessionLocal, engine, utcnow
 from .demo_execution import client, dispatch, has_unmanaged_exposure, reconcile
-from .domain import check_risk, evaluate
+from .domain import check_risk, evaluate, validate_parameters
 from .execution import (
     amount,
     check_context,
@@ -134,7 +134,8 @@ async def step(ticker: MarketTicker | None = None) -> float:
             can_open = update_state(db, bot, blocked=risk.kill_switch or not config.enabled)
             fixture = fixture_enabled(bot.mode, bot.exchange, bot.instrument)
             mode, exchange, instrument, cursor = bot.mode, bot.exchange, bot.instrument, bot.cursor
-            parameters, version, strategy = run.parameters, run.strategy_version, run.strategy
+            strategy, version = run.strategy, run.strategy_version
+            parameters = validate_parameters(strategy, run.parameters)
             connection = db.get(ExchangeConnection, exchange) if mode == "BROKER_DEMO" else None
             if connection:
                 venue = client(connection)
