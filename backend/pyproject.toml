@@ -1,0 +1,44 @@
+[project]
+name = "cauche-pulse"
+version = "0.1.0"
+description = "Demo-first trading intelligence"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "alembic>=1.18,<2",
+  "argon2-cffi>=25.1,<26",
+  "cryptography>=50,<51",
+  "email-validator>=2.3,<3",
+  "fastapi>=0.128,<1",
+  "httpx>=0.28.1,<1",
+  "psycopg[binary]>=3.3,<4",
+  "pydantic-settings>=2.12,<3",
+  "sqlalchemy>=2.0.46,<2.1",
+  "uvicorn[standard]>=0.40,<1",
+  "websockets>=15,<17",
+]
+
+[dependency-groups]
+dev = [
+  "bandit>=1.9,<2",
+  "pip-audit>=2.10,<3",
+  "pytest>=9,<10",
+  "pytest-asyncio>=1.3,<2",
+  "pytest-cov>=7,<8",
+  "ruff>=0.15,<1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error::RuntimeWarning"]
+
+[tool.ruff]
+target-version = "py312"
+exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.uv]
+package = false

@@ -1,5 +1,27 @@
 # Deployment
 
-Expected local entry point: docker compose up --build. This will expose the site on a loopback address and keep the database internal. Bootstrap the first administrator with the CLI using a password prompt. Copy the example environment file for optional venue credentials or advanced settings. Never commit that file.
+## Loopback installation
 
-Use authenticated TLS termination for access beyond loopback. Back up with pg_dump and validate restoration in an isolated database. Store the master credential separately. Stop the bot, verify open broker orders, and stop Compose without deleting its volume before upgrading. Check current acceptance in the evidence bundle.
+Run `docker compose -p cauche-pulse up --build -d --wait` from the repository. The explicit project flag isolates this stack even when the shell defines another Compose project. Visit http://localhost:8080. PostgreSQL, API and worker run on the private Compose network. The reverse proxy binds the host port only to 127.0.0.1.
+
+Create the owner from a terminal:
+
+```sh
+docker compose -p cauche-pulse exec api python -m app.bootstrap --email owner@example.test
+```
+
+Run the command from the checkout. The bootstrap requires a password of 14–128 characters and prompts for confirmation. A passphrase of several unrelated words can meet the length requirement. The terminal hides typed characters. For an isolated CI environment, pipe a generated password with `--password-file /dev/stdin`. Keep that password out of shell history and source files. The login session uses a loopback-only HTTP development cookie. For private remote access, configure external TLS termination with WebSocket forwarding and set `APP_ORIGIN` to its exact HTTPS origin before recreating the stack. Keep the loopback binding, and use a private network, authenticated tunnel or VPN.
+
+## Optional official demo credentials
+
+Copy the example environment file to a private local environment file. Generate a Fernet key in the running installation using `docker compose exec api python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Put the result in `CAUCHE_MASTER_KEY` and recreate API and worker. Back up the key separately from the database.
+
+Sign in and open Administration → Connections. Save the Deriv PAT, registered App ID and optional demo account ID, or the Kalshi **demo** API key ID and PEM. Use the connection test to confirm authentication and a USD account. The UI only returns masked state. Confirm the connected instrument, allowed contract, account currency and strategy eligibility before starting. Use a dedicated demo account with no unmanaged orders or exposure. Inspect broker records independently before counting demo acceptance. The code uses the official sandbox hosts for mutations.
+
+## Operations
+
+- Read `docker compose ps -a` and `docker compose logs --tail 100 api worker web`. Query `/api/health` and verify schema with `docker compose exec api alembic current --check-heads`.
+- Back up by writing `docker compose exec -T db pg_dump -U cauche -d cauche -Fc` to a binary file using a binary-safe shell. Encrypt and protect the backup. Rehearse `pg_restore --exit-on-error` into an isolated empty database before relying on it. Restore the matching original master key separately. A database backup contains encrypted credentials, hashed sessions and trading history.
+- For an update, save a backup, stop strategy execution, verify pending broker orders and reconcile ambiguous submissions. Run `docker compose down`, then rebuild and start. Preserve the volume. Automated startup performs Alembic upgrades.
+- For safe shutdown, halt execution and confirm open positions or managed expirations in the broker sandbox. Run `docker compose stop`. Keep PostgreSQL state for restart. A Deriv contract can settle while services are offline, so review its subsequent reconciliation.
+- If a Deriv acknowledgement is lost, verify the demo account manually. The worker retains the unknown claim and refuses duplicate dispatch. Reconciliation of an ambiguous unidentifiable Deriv purchase requires operator review.
