@@ -13,9 +13,8 @@ async function login(page: Page) {
   await expect(page.getByRole('heading', { name: 'Visão geral' })).toBeVisible();
 }
 
-async function confirmIfShown(page: Page) {
-  const approval = page.getByRole('dialog');
-  if (await approval.isVisible()) await approval.getByRole('button', { name: 'Confirmar', exact: true }).click();
+async function confirm(page: Page) {
+  await page.getByRole('dialog').getByRole('button', { name: 'Confirmar', exact: true }).click();
 }
 
 test('redirected owner login, protected views and mobile layout', async ({ page }) => {
@@ -106,12 +105,11 @@ test('fixture replay and paper orders, lifecycle and persisted event recovery', 
 test('execution starts and stops through terminal controls', async ({ page }) => {
   await login(page);
   await page.getByRole('navigation', { name: 'Navegação principal' }).getByRole('link', { name: 'Terminal', exact: true }).click();
-  await page.getByLabel('Estratégia', { exact: true }).selectOption('DERIV-STRAT-02');
+  await page.getByRole('combobox', { name: 'Estratégia', exact: true }).selectOption('DERIV-STRAT-02');
   await page.getByRole('button', { name: 'Iniciar operação', exact: true }).click();
-  await confirmIfShown(page);
   await expect(page.getByRole('button', { name: 'Pausar operação', exact: true })).toBeEnabled();
   await page.getByRole('button', { name: 'Encerrar operação', exact: true }).click();
-  await confirmIfShown(page);
+  await confirm(page);
   await expect(page.getByRole('button', { name: 'Iniciar operação', exact: true })).toBeEnabled();
 });
 
@@ -120,7 +118,7 @@ test('backtest result and encrypted connection settings through the interface', 
   await login(page);
   await page.getByRole('navigation', { name: 'Navegação principal' }).getByRole('link', { name: 'Backtests', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Backtests' })).toBeVisible();
-  await page.getByLabel('Corretora', { exact: true }).selectOption('KALSHI');
+  await page.getByRole('combobox', { name: 'Corretora', exact: true }).selectOption('KALSHI');
   await page.getByRole('button', { name: 'Executar backtest', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Métricas do backtest' })).toBeVisible({ timeout: 30_000 });
   await page.screenshot({ path: 'test-results/evidence/backtest.png', fullPage: true });
@@ -132,13 +130,13 @@ test('backtest result and encrypted connection settings through the interface', 
   await deriv.getByLabel(/ID do aplicativo/i).fill('synthetic-ui-app');
   await deriv.getByLabel(/token/i).fill('synthetic-ui-fixture');
   await deriv.getByRole('button', { name: 'Salvar conexão' }).click();
-  await confirmIfShown(page);
+  await confirm(page);
   await expect(deriv.getByText('Configuração salva')).toBeVisible();
   const stored = await (await page.request.get('/api/admin/connections')).json();
   expect(JSON.stringify(stored)).not.toContain('synthetic-ui-fixture');
   expect(stored.items.find((row: { exchange: string }) => row.exchange === 'DERIV').configured).toBe(true);
   await deriv.getByRole('button', { name: 'Desconectar', exact: true }).click();
-  await confirmIfShown(page);
+  await confirm(page);
   await expect(deriv.getByText('Conexão removida')).toBeVisible();
   await page.screenshot({ path: 'test-results/evidence/admin.png', fullPage: true });
 });
