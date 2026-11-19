@@ -24,7 +24,7 @@ test('redirected owner login, protected views and mobile layout', async ({ page 
   await mkdir('test-results/evidence', { recursive: true });
   await expect(page.getByRole('img', { name: /Candles/ })).toBeVisible();
   await page.screenshot({ path: 'test-results/evidence/overview.png', fullPage: true });
-  await page.getByRole('link', { name: 'Administração', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Navegação principal' }).getByRole('link', { name: 'Administração', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Visão operacional' }).first()).toBeVisible();
   await page.goto('/');
   await page.setViewportSize({ width: 390, height: 844 });
@@ -94,18 +94,18 @@ test('fixture replay and paper orders, lifecycle and persisted event recovery', 
   }), cursor);
   expect(received).toBeGreaterThan(cursor);
 
-  await page.getByRole('link', { name: 'Terminal', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Navegação principal' }).getByRole('link', { name: 'Terminal', exact: true }).click();
   await expect(page.getByRole('heading', { name: /Terminal/ }).first()).toBeVisible();
   await page.screenshot({ path: 'test-results/evidence/terminal.png', fullPage: true });
-  await page.getByRole('link', { name: 'Histórico', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Navegação principal' }).getByRole('link', { name: 'Histórico', exact: true }).click();
   await expect(page.getByRole('heading', { name: /Histórico/ }).first()).toBeVisible();
-  await page.getByRole('link', { name: 'Eventos', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Navegação principal' }).getByRole('link', { name: 'Eventos', exact: true }).click();
   await expect(page.getByRole('heading', { name: /Eventos/ }).first()).toBeVisible();
 });
 
 test('execution starts and stops through terminal controls', async ({ page }) => {
   await login(page);
-  await page.getByRole('link', { name: 'Terminal', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Navegação principal' }).getByRole('link', { name: 'Terminal', exact: true }).click();
   await page.getByLabel('Estratégia', { exact: true }).selectOption('DERIV-STRAT-02');
   await page.getByRole('button', { name: 'Iniciar operação', exact: true }).click();
   await confirmIfShown(page);
@@ -118,14 +118,14 @@ test('execution starts and stops through terminal controls', async ({ page }) =>
 
 test('backtest result and encrypted connection settings through the interface', async ({ page }) => {
   await login(page);
-  await page.getByRole('link', { name: 'Backtests', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Navegação principal' }).getByRole('link', { name: 'Backtests', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Backtests' })).toBeVisible();
   await page.getByLabel('Corretora', { exact: true }).selectOption('KALSHI');
   await page.getByRole('button', { name: 'Executar backtest', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Métricas do backtest' })).toBeVisible({ timeout: 30_000 });
   await page.screenshot({ path: 'test-results/evidence/backtest.png', fullPage: true });
 
-  await page.getByRole('link', { name: 'Administração', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Navegação principal' }).getByRole('link', { name: 'Administração', exact: true }).click();
   await page.getByRole('link', { name: 'Conexões', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Conexões' })).toBeVisible();
   const deriv = page.locator('form').filter({ has: page.getByRole('heading', { name: 'Deriv', exact: true }) });
