@@ -7,10 +7,10 @@ Run `docker compose -p cauche-pulse up --build -d --wait` from the repository. T
 Create the owner from a terminal:
 
 ```sh
-docker compose exec api python -m app.bootstrap --email owner@example.test
+docker compose -p cauche-pulse exec api python -m app.bootstrap --email owner@example.test
 ```
 
-The bootstrap prompts for a password and its confirmation. For an isolated CI environment, pipe a generated password with `--password-file /dev/stdin`. Keep that password out of shell history and source files. The login session uses a loopback-only HTTP development cookie. For private remote access, configure external TLS termination with WebSocket forwarding and set `APP_ORIGIN` to its exact HTTPS origin before recreating the stack. Keep the loopback binding, and use a private network, authenticated tunnel or VPN.
+Run the command from the checkout. The bootstrap requires a password of 14–128 characters and prompts for confirmation. A passphrase of several unrelated words can meet the length requirement. The terminal hides typed characters. For an isolated CI environment, pipe a generated password with `--password-file /dev/stdin`. Keep that password out of shell history and source files. The login session uses a loopback-only HTTP development cookie. For private remote access, configure external TLS termination with WebSocket forwarding and set `APP_ORIGIN` to its exact HTTPS origin before recreating the stack. Keep the loopback binding, and use a private network, authenticated tunnel or VPN.
 
 ## Optional official demo credentials
 

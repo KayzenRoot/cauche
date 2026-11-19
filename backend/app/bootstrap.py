@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import sys
 from getpass import getpass
 from pathlib import Path
 
@@ -11,7 +12,15 @@ from .db import SessionLocal, lock
 from .events import audit
 from .models import User
 from .schemas import normalize_email
-from .security import AUTH_LOCK, hash_password
+from .security import (
+    AUTH_LOCK,
+    PASSWORD_MAX_LENGTH,
+    PASSWORD_MIN_LENGTH,
+    hash_password,
+    validate_password_length,
+)
+
+PASSWORD_REQUIREMENT = f"A senha deve ter de {PASSWORD_MIN_LENGTH} a {PASSWORD_MAX_LENGTH} caracteres."
 
 
 def bootstrap(email: str, password: str) -> bool:
@@ -27,24 +36,48 @@ def bootstrap(email: str, password: str) -> bool:
     return True
 
 
+def prompt_password() -> str:
+    print(PASSWORD_REQUIREMENT, file=sys.stderr)
+    while True:
+        password = getpass("Senha do proprietário: ")
+        try:
+            validate_password_length(password)
+        except ValueError:
+            print(PASSWORD_REQUIREMENT, file=sys.stderr)
+            continue
+        if getpass("Repita a senha: ") == password:
+            return password
+        print("As senhas não coincidem. Tente novamente.", file=sys.stderr)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Bootstrap the singleton administrator")
+    parser = argparse.ArgumentParser(description="Criar o primeiro proprietário")
     parser.add_argument("--email", required=True)
     parser.add_argument("--password-file", type=Path)
     options = parser.parse_args()
+    try:
+        email = normalize_email(options.email)
+    except ValueError:
+        parser.exit(2, "Informe um endereço de e-mail válido.\n")
     try:
         if options.password_file:
             password = options.password_file.read_text(encoding="utf-8").rstrip("\r\n")
         elif "CAUCHE_BOOTSTRAP_PASSWORD" in os.environ:
             password = os.environ["CAUCHE_BOOTSTRAP_PASSWORD"]
         else:
-            password = getpass("Owner password: ")
-            if getpass("Repeat password: ") != password:
-                parser.exit(2, "Passwords differ.\n")
-        created = bootstrap(options.email, password)
-    except (OSError, ValueError, SQLAlchemyError):
-        parser.exit(2, "Bootstrap failed. Verify migrations, email, and a 14–128 character password.\n")
-    print("Owner created." if created else "Owner already exists.")
+            password = prompt_password()
+        validate_password_length(password)
+    except (OSError, UnicodeError):
+        parser.exit(2, "Não foi possível ler a senha. Verifique a fonte informada.\n")
+    except ValueError:
+        parser.exit(2, PASSWORD_REQUIREMENT + "\n")
+    except (EOFError, KeyboardInterrupt):
+        parser.exit(2, "\nCadastro cancelado.\n")
+    try:
+        created = bootstrap(email, password)
+    except SQLAlchemyError:
+        parser.exit(2, "Não foi possível gravar o proprietário. Verifique o banco e a migração.\n")
+    print("Proprietário criado." if created else "O proprietário já está cadastrado.")
 
 
 if __name__ == "__main__":

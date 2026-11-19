@@ -26,9 +26,17 @@ HASHER = PasswordHasher()
 DUMMY_HASH = HASHER.hash(secrets.token_urlsafe(32))
 
 
-def hash_password(password: str) -> str:
-    if not 14 <= len(password) <= 128:
+PASSWORD_MIN_LENGTH = 14
+PASSWORD_MAX_LENGTH = 128
+
+
+def validate_password_length(password: str) -> None:
+    if not PASSWORD_MIN_LENGTH <= len(password) <= PASSWORD_MAX_LENGTH:
         raise ValueError("PASSWORD_LENGTH")
+
+
+def hash_password(password: str) -> str:
+    validate_password_length(password)
     return HASHER.hash(password)
 
 
