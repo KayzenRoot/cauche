@@ -1,0 +1,3 @@
+# Test and benchmark plan
+
+Exercise positive and negative strategy decisions, closed bars and temporal invariants, exact settlement, simulator fills, account isolation, duplicate protection, risk gates, authentication, credential redaction, official payload contracts and browser flows. Validate migration and PostgreSQL concurrency against the Docker stack, and verify the runtime smoke through its public origin. Run lint, typecheck, production build, dependency and secret scanning. Capture evidence with timestamps and commands. Report official demo outcomes only when authenticated and observed. No performance SLA is asserted.
