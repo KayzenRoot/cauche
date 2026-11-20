@@ -64,3 +64,27 @@ test("leased due checks persist exact results and surface changed terms separate
     ["SETTLED", "YES", "2026-11-10T02:00:00.000Z"]);
   assert.deepEqual(writes.find(args => args[0] === "KXOTHER").slice(2, 5), ["RULES_CHANGED", null, null]);
 });
+
+
+test("older journal rows are tracked without rewriting the original evidence", async () => {
+  const statements = [];
+  const db = { async query(sql, args) {
+    statements.push(sql);
+    if (sql.startsWith("SELECT DISTINCT")) {
+      assert.match(sql, /AS primary_rules/);
+      return { rows: [{
+        ticker, event_ticker: first.event_ticker, closes_at: first.closes_at,
+        primary_rules: first.primary, secondary_rules: first.secondary,
+      }] };
+    }
+    if (sql.startsWith("INSERT")) {
+      assert.match(sql, /INSERT INTO cauche_free\.research_settlements/);
+      assert.equal(args[1], await contractKey(ticker, first));
+      assert.equal(JSON.parse(args[3]).primary, first.primary);
+    }
+    return { rows: [] };
+  } };
+  assert.deepEqual(await processSettlements(db), { processed: 0, settled: 0 });
+  assert.equal(statements.length, 3);
+  assert.ok(!statements.some(sql => /^UPDATE cauche_free\.research_observations/.test(sql)));
+});

@@ -65,21 +65,22 @@ export const joinPriorSettlement = "(s.due_at = CASE WHEN pg_input_is_valid(j.ev
 async function queueEarlierObservations(db) {
   const { rows } = await db.query(
     "SELECT DISTINCT j.ticker, j.evidence->>'event' AS event_ticker, j.evidence->>'closes_at' AS closes_at, "
-    + "j.evidence->'rules'->>'primary' AS primary, COALESCE(j.evidence->'rules'->>'secondary', '') AS secondary "
+    + "j.evidence->'rules'->>'primary' AS primary_rules, COALESCE(j.evidence->'rules'->>'secondary', '') AS secondary_rules "
     + "FROM cauche_free.research_observations j WHERE NOT (j.evidence ? 'contract_key') "
     + "AND length(j.evidence->>'event') > 0 AND length(j.evidence->'rules'->>'primary') > 0 "
     + "AND pg_input_is_valid(j.evidence->>'closes_at', 'timestamptz') "
     + "AND NOT EXISTS (SELECT 1 FROM cauche_free.research_settlements s WHERE s.ticker = j.ticker AND "
-    + joinPriorSettlement + ") ORDER BY j.ticker, closes_at, event_ticker, primary, secondary LIMIT $1",
+    + joinPriorSettlement + ") ORDER BY j.ticker, closes_at, event_ticker, primary_rules, secondary_rules LIMIT $1",
     [LIMIT],
   );
   for (const row of rows) {
-    const key = await contractKey(row.ticker, row);
+    const market = { ...row, primary: row.primary_rules, secondary: row.secondary_rules };
+    const key = await contractKey(row.ticker, market);
     if (!key) continue;
     await db.query(
       "INSERT INTO cauche_free.research_settlements (ticker, contract_key, due_at, next_check_at, terms) "
       + "VALUES ($1, $2, $3::timestamptz, $3::timestamptz + interval '15 minutes', $4) ON CONFLICT DO NOTHING",
-      [row.ticker, key, row.closes_at, storedTerms(row)],
+      [row.ticker, key, row.closes_at, storedTerms(market)],
     );
   }
 }
