@@ -1,11 +1,11 @@
 import { lazy, StrictMode, Suspense, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { createRoot } from 'react-dom/client'
-import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { BrowserRouter, Link, NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { MotionConfig, motion } from 'motion/react'
 import {
-  Activity, ArrowRight, CandlestickChart, ChartNoAxesCombined, Clock3, Eye, EyeOff, FlaskConical,
+  Activity, ArrowRight, BrainCircuit, CandlestickChart, ChartNoAxesCombined, Clock3, Eye, EyeOff, FlaskConical,
   History, LayoutDashboard, LockKeyhole, LogOut, PanelLeftClose, PanelLeftOpen, Radio, Settings2,
   ShieldCheck, Terminal, UserRound,
 } from 'lucide-react'
@@ -18,9 +18,11 @@ import type { List, Scope, Session, Strategy } from './types'
 
 const TradingPage = lazy(() => import('./pages/trading').then(module => ({ default: module.TradingPage })))
 const BacktestsPage = lazy(() => import('./pages/backtests').then(module => ({ default: module.BacktestsPage })))
+const ResearchPage = lazy(() => import('./pages/research').then(module => ({ default: module.ResearchPage })))
 const HistoryPage = lazy(() => import('./pages/records').then(module => ({ default: module.HistoryPage })))
 const LogsPage = lazy(() => import('./pages/records').then(module => ({ default: module.LogsPage })))
 const AdminPages = lazy(() => import('./pages/admin').then(module => ({ default: module.AdminPages })))
+const ConnectionsPage = lazy(() => import('./pages/admin').then(module => ({ default: module.ConnectionsPage })))
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -71,7 +73,7 @@ function Login() {
       </div>
       <div className="login-tagline"><span><Activity size={16} aria-hidden="true" /> Automated Trading Intelligence</span>
         <h2>Estratégia,<br />com controle.</h2>
-        <p>Simule, acompanhe e audite suas decisões em um terminal privado.</p>
+        <p>{import.meta.env.MODE === 'cauche-free' ? 'Configure suas contas e confira a conexão com as corretoras.' : 'Simule, acompanhe e audite suas decisões em um terminal privado.'}</p>
       </div>
     </section>
     <div className="login-access">
@@ -99,6 +101,7 @@ const navigation = [
   { to: '/', name: 'Visão geral', Icon: LayoutDashboard },
   { to: '/terminal', name: 'Terminal', Icon: CandlestickChart },
   { to: '/backtests', name: 'Backtests', Icon: FlaskConical },
+  { to: '/inteligencia', name: 'Inteligência', Icon: BrainCircuit },
   { to: '/historico', name: 'Histórico', Icon: History },
   { to: '/eventos', name: 'Eventos', Icon: Terminal },
   { to: '/admin', name: 'Administração', Icon: Settings2 },
@@ -149,9 +152,9 @@ function Workspace({ session }: {session: Session}) {
       <div className="sidebar-brand"><NavLink to="/" title="CAUCHE PULSE"><Brand compact={collapsed} /></NavLink></div>
       <nav aria-label="Navegação principal">
         <span className="nav-heading">Operação</span>
-        {navigation.slice(0, 4).map(link)}
+        {navigation.slice(0, 5).map(link)}
         <span className="nav-heading">Monitoramento</span>
-        {navigation.slice(4).filter(item => item.to !== '/admin' || admin).map(link)}
+        {navigation.slice(5).filter(item => item.to !== '/admin' || admin).map(link)}
       </nav>
       <div className="sidebar-foot">
         <div className="sidebar-policy"><LockKeyhole size={16} aria-hidden="true" /><span>Execução real bloqueada</span></div>
@@ -176,6 +179,9 @@ function Workspace({ session }: {session: Session}) {
             {accountOpen && <div className="account-popover">
               <strong>{session.email}</strong>
               <span>{admin ? 'Administrador' : 'Proprietário'}</span>
+              {admin && <Link className="button" to="/admin/conexoes" onClick={() => setAccountOpen(false)}>
+                <Settings2 size={15} aria-hidden="true" /> Configurações da conta
+              </Link>}
               <button type="button" onClick={() => logout.mutate()} disabled={logout.isPending}><LogOut size={15} aria-hidden="true" /> Sair</button>
               {logout.isError && <Problem error={logout.error} />}
             </div>}
@@ -189,6 +195,7 @@ function Workspace({ session }: {session: Session}) {
             <Route path="/" element={<TradingPage scope={scope} update={setScope} strategies={strategyList} session={session} stream={stream} terminal={false} />} />
             <Route path="/terminal" element={<TradingPage scope={scope} update={setScope} strategies={strategyList} session={session} stream={stream} terminal />} />
             <Route path="/backtests" element={<BacktestsPage session={session} strategies={strategyList} />} />
+            <Route path="/inteligencia" element={<ResearchPage session={session} />} />
             <Route path="/historico" element={<HistoryPage scope={scope} update={setScope} strategies={strategyList} />} />
             <Route path="/eventos" element={<LogsPage strategies={strategyList} stream={stream} />} />
             <Route path="/admin/*" element={<AdminPages session={session} scope={scope} update={setScope} strategies={strategyList} stream={stream} />} />
@@ -197,6 +204,50 @@ function Workspace({ session }: {session: Session}) {
         </motion.div>
       </main>
       <footer className="terminal-footer"><span>CAUCHE PULSE <b>v0.1.0</b></span><span><Radio size={14} aria-hidden="true" /> {stream === 'online' ? 'Canal de eventos conectado' : 'Sincronização sujeita à reconexão'}</span></footer>
+    </div>
+  </div>
+}
+
+function FreeWorkspace({ session }: {session: Session}) {
+  const client = useQueryClient()
+  const logout = useMutation({
+    mutationFn: () => api<void>('/auth/logout', { method: 'POST', session }),
+    onSuccess: () => {
+      client.setQueryData(['session'], null)
+      client.removeQueries({ predicate: query => query.queryKey[0] !== 'session' })
+    },
+  })
+  return <div className="workspace sidebar-collapsed">
+    <a href="#main-content" className="skip-link">Pular para o conteúdo</a>
+    <aside className="sidebar" aria-label="Menu principal">
+      <div className="sidebar-brand"><Brand compact /></div>
+      <nav aria-label="Navegação principal">
+        <NavLink to="/inteligencia" title="Inteligência" aria-label="Inteligência"><BrainCircuit size={19} aria-hidden="true" /><span>Inteligência</span></NavLink>
+        <NavLink to="/admin/conexoes" title="Configurações da conta"><Settings2 size={19} aria-hidden="true" /><span>Configurações da conta</span></NavLink>
+      </nav>
+    </aside>
+    <div className="workspace-main">
+      <header className="topbar">
+        <div className="topbar-left"><LockKeyhole size={17} aria-hidden="true" /><span>Terminal privado</span></div>
+        <div className="topbar-right">
+          <button type="button" onClick={() => logout.mutate()} disabled={logout.isPending}><LogOut size={15} aria-hidden="true" /> Sair</button>
+        </div>
+      </header>
+      <main id="main-content" tabIndex={-1} className="content">
+        <div className="page-stack">
+          {logout.isError && <Problem error={logout.error} />}
+          <Suspense fallback={<Loading />}><Routes>
+            <Route path="/admin/conexoes" element={<>
+              <section className="panel setting-banner">
+                <div><h2>Configurações da conta</h2><p>Teste conexões e consulte saldos. Para validação de estratégias, acesse Inteligência.</p></div>
+              </section>
+              <ConnectionsPage session={session} />
+            </>} />
+            <Route path="/inteligencia" element={<ResearchPage session={session} />} />
+            <Route path="*" element={<Navigate to="/admin/conexoes" replace />} />
+          </Routes></Suspense>
+        </div>
+      </main>
     </div>
   </div>
 }
@@ -220,7 +271,9 @@ function App() {
   if (session.isPending) return <main className="app-pending"><Brand /><Loading /></main>
   if (session.isError) return <main className="app-pending"><Brand /><Problem error={session.error} retry={() => void session.refetch()} /></main>
   if (!session.data) return <Login />
-  return <Workspace key={session.data.email} session={session.data} />
+  return import.meta.env.MODE === 'cauche-free'
+    ? <FreeWorkspace key={session.data.email} session={session.data} />
+    : <Workspace key={session.data.email} session={session.data} />
 }
 
 createRoot(document.getElementById('root')!).render(

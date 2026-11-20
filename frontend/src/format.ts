@@ -19,7 +19,7 @@ const labels: Record<string, string> = {
   RISK_BLOCKED: 'Bloqueado pelo risco', DISCONNECTED: 'Desconectado',
   STALE: 'Desatualizado', NOT_CONFIGURED: 'A configurar', AUTH_ERROR: 'Falha de autenticação',
   CONNECTED: 'Conectada', AUTHENTICATED: 'Autenticada', FRESH: 'Atualizado',
-  ONLINE: 'Online', OFFLINE: 'Offline', UNVERIFIED: 'A verificar', SIMULATED: 'Simulado',
+  ONLINE: 'Online', OFFLINE: 'Offline', UNVERIFIED: 'A verificar', VERIFIED: 'Verificada', SIMULATED: 'Simulado',
   READY: 'Disponível', HEALTHY: 'Operacional', OK: 'Operacional', ACTIVE: 'Ativo',
   DISABLED: 'Desativado', IDLE: 'Em espera', INFO: 'Informação', WARNING: 'Atenção',
   WARN: 'Atenção', CRITICAL: 'Crítico', UNKNOWN: 'Desconhecido', UNAVAILABLE: 'Indisponível',
@@ -112,7 +112,7 @@ export type Tone = 'green' | 'lime' | 'amber' | 'red' | 'neutral' | 'blue'
 
 export function statusTone(state?: string | null): Tone {
   const value = state?.toUpperCase() ?? ''
-  if (['RUNNING', 'CONNECTED', 'AUTHENTICATED', 'FRESH', 'OK', 'HEALTHY', 'FILLED', 'SETTLED', 'COMPLETED', 'ACTIVE', 'ONLINE'].includes(value)) return 'green'
+  if (['VERIFIED', 'RUNNING', 'CONNECTED', 'AUTHENTICATED', 'FRESH', 'OK', 'HEALTHY', 'FILLED', 'SETTLED', 'COMPLETED', 'ACTIVE', 'ONLINE'].includes(value)) return 'green'
   if (['PAUSING', 'PAUSED', 'STOPPING', 'STARTING', 'STALE', 'WARNING', 'WARN', 'NOT_CONFIGURED', 'PARTIAL', 'UNKNOWN', 'UNVERIFIED'].includes(value)) return 'amber'
   if (['ERROR', 'RISK_BLOCKED', 'AUTH_ERROR', 'DISCONNECTED', 'CRITICAL', 'FAILED', 'REJECTED', 'UNAVAILABLE', 'OFFLINE'].includes(value)) return 'red'
   return 'neutral'

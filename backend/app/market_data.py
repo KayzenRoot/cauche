@@ -9,10 +9,11 @@ from hashlib import sha256
 from .domain import Book, Candle, DerivQuote, Market
 from .fixtures import dataset
 from .integrations import Deriv, Kalshi, VenueError
-from .quant.types import Relation
+from .quant.types import BookLevel, Relation
 
 DERIV_SYMBOLS = {"EUR/USD": "frxEURUSD", "GBP/USD": "frxGBPUSD", "USD/JPY": "frxUSDJPY"}
 ZERO = Decimal("0")
+BOOK_LEVELS_PER_SIDE = 20
 
 
 def epoch() -> int:
@@ -67,19 +68,24 @@ async def deriv_observation(instrument: str, parameters: dict) -> Market:
             try:
                 quote = await venue.quote(native, side, stake, duration=duration // 60)
                 if quote.get("currency", "USD") == "USD":
+                    expiry = quote.get("expires_at")
                     quotes.append(DerivQuote(
                         side, Decimal(str(quote["stake"])), Decimal(str(quote["payout"])), duration,
+                        observed_at=int(quote["observed_at"]),
+                        spot=Decimal(str(quote["spot"])),
+                        expires_at=int(expiry) if expiry is not None else None,
                     ))
             except VenueError:
                 # A verified absence of a price or contract leaves the product unorderable.
                 continue
     now = epoch()
     bars = closed_candles(lower, 300, now)
-    if not bars or now - bars[-1].time > 315:
+    if not bars or now - bars[-1].time >= 300:
         raise ValueError("STALE_MARKET_DATA")
     return Market(
-        "DERIV", instrument, native, bars[-1].time, "DERIV_OFFICIAL_PUBLIC",
-        bars, closed_candles(higher, 900, now), contracts=tuple(quotes),
+        "DERIV", instrument, native, now, "DERIV_OFFICIAL_PUBLIC",
+        bars, closed_candles(higher, 900, now),
+        contracts=tuple(quote for quote in quotes if 0 <= now - quote.observed_at <= 10),
     )
 
 
@@ -143,6 +149,11 @@ async def kalshi_observation(instrument: str, *, demo: bool, scanner: bool = Fal
         book=normalize_book(meta, levels), outcome=outcome, relation=relation,
         rules_id=relation.rules_id if relation else "",
         closes_at=meta.get("close_time"),
+        book_levels=tuple(
+            BookLevel(side, price, size)
+            for side, key in (("YES", "yes_bids"), ("NO", "no_bids"))
+            for price, size in levels.get(key, [])[:BOOK_LEVELS_PER_SIDE]
+        ),
     )
 
 async def observe(mode: str, exchange: str, instrument: str, cursor: int, parameters: dict, *, strategy: str = "") -> Market | None:

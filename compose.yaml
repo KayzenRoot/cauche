@@ -1,7 +1,7 @@
 name: cauche-pulse
 x-backend: &backend
   image: cauche-pulse-api:local
-  environment:
+  environment: &backend-environment
     DATABASE_URL: postgresql+psycopg://cauche:${POSTGRES_PASSWORD:-loopback-bootstrap-db}@db:5432/cauche
     APP_ORIGIN: ${APP_ORIGIN:-http://localhost:8080}
     CAUCHE_MASTER_KEY: ${CAUCHE_MASTER_KEY:-}
@@ -30,6 +30,9 @@ services:
         condition: service_healthy
   api:
     <<: *backend
+    environment:
+      <<: *backend-environment
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
     build:
       context: ./backend
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
