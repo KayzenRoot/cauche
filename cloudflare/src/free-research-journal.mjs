@@ -1,4 +1,5 @@
 import { ResearchError, responseJson } from "./free-research.mjs";
+import { enqueueSql, joinPriorSettlement } from "./free-research-settlement.mjs";
 
 const KALSHI = "https://external-api.kalshi.com/trade-api/v2/markets/";
 const TICKER = /^[A-Z0-9][A-Z0-9._-]{0,99}$/;
@@ -63,11 +64,7 @@ export async function recordInspection(db, result, book) {
     model: result.model,
     extraction: result.extraction,
   };
-  const { rows } = await db.query(
-    "INSERT INTO cauche_free.research_observations (ticker, observed_at, evidence) VALUES ($1, $2, $3) RETURNING id",
-    [result.ticker, book.observed_at ?? result.observed_at, JSON.stringify(evidence)],
-  );
-  return rows[0].id;
+  return enqueueSql(db, result, evidence);
 }
 
 function integerParameter(params, name, fallback, lower, upper) {
@@ -83,7 +80,12 @@ export async function journalPage(db, params) {
   const limit = integerParameter(params, "limit", 25, 1, 100);
   const offset = integerParameter(params, "offset", 0, 0, 100000);
   const { rows } = await db.query(
-    "SELECT id, ticker, observed_at, evidence FROM cauche_free.research_observations ORDER BY id DESC LIMIT $1 OFFSET $2",
+    "SELECT j.id, j.ticker, j.observed_at, j.evidence, s.status, s.result, s.settled_at, "
+    + "s.observed_at AS settlement_observed_at, s.source FROM cauche_free.research_observations j "
+    + "LEFT JOIN LATERAL (SELECT s.* FROM cauche_free.research_settlements s WHERE s.ticker = j.ticker AND "
+    + "(s.contract_key = j.evidence->>'contract_key' OR (NOT (j.evidence ? 'contract_key') AND "
+    + joinPriorSettlement + ")) ORDER BY s.contract_key LIMIT 1) s ON true "
+    + "ORDER BY j.id DESC LIMIT $1 OFFSET $2",
     [limit, offset],
   );
   const total = Number((await db.query("SELECT count(*) AS n FROM cauche_free.research_observations")).rows[0].n);
@@ -92,7 +94,13 @@ export async function journalPage(db, params) {
     items: rows.map(row => ({
       id: String(row.id), exchange: "KALSHI", instrument: row.ticker,
       timestamp: row.observed_at, reason: "REVIEW_REQUIRED", mode: "READ_ONLY",
-      data: { evidence: row.evidence },
+      data: {
+        evidence: row.evidence,
+        ...(row.status ? { resolution: {
+          status: row.status, result: row.result, settled_at: row.settled_at,
+          observed_at: row.settlement_observed_at, source: row.source,
+        } } : {}),
+      },
     })),
   };
 }

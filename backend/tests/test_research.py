@@ -75,3 +75,18 @@ async def test_market_error_is_redacted():
     with pytest.raises(ResearchError, match="KALSHI_RULES_UNAVAILABLE") as error:
         await inspect_kalshi(EvidenceRequest(ticker=TICKER), transport=httpx.MockTransport(upstream))
     assert error.value.status == 502
+
+
+
+@pytest.mark.asyncio
+async def test_public_only_inspection_skips_configured_provider(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "synthetic-key")
+
+    def upstream(request):
+        assert request.url.host == "external-api.kalshi.com"
+        return market()
+
+    result = await inspect_kalshi(EvidenceRequest(ticker=TICKER, use_model=False),
+                                  transport=httpx.MockTransport(upstream))
+    assert result["model_status"] == "SKIPPED"
+    assert result["extraction"] is None

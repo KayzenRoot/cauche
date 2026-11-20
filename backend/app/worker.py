@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from .config import LOG_RETENTION_DAYS
 from .db import SessionLocal, engine, utcnow
 from .demo_execution import client, dispatch, has_unmanaged_exposure, reconcile
+from .deriv_shadow import resolve_due_candidate
 from .domain import check_risk, evaluate, validate_parameters
 from .execution import (
     amount,
@@ -38,6 +39,7 @@ LOG = logging.getLogger("cauche.worker")
 FIXTURE_TICK = 0.08
 MARKET_TICK = 5.0
 LEASE_KEY = 0x434155434845
+SHADOW_POLL_SECONDS = 15
 
 
 def locked_bot(db) -> Bot | None:
@@ -319,6 +321,7 @@ async def loop() -> None:
         except NotImplementedError:
             signal.signal(signum, lambda *_: event_loop.call_soon_threadsafe(stopped.set))
     ticker = MarketTicker()
+    next_shadow_poll = 0.0
     LOG.info("worker_start")
     while not stopped.is_set():
         delay = MARKET_TICK
@@ -331,6 +334,10 @@ async def loop() -> None:
                 try:
                     if acquired:
                         delay = await step(ticker)
+                        now = event_loop.time()
+                        if now >= next_shadow_poll:
+                            next_shadow_poll = now + SHADOW_POLL_SECONDS
+                            await resolve_due_candidate(SessionLocal)
                 finally:
                     if acquired and lease.dialect.name == "postgresql" and not lease.invalidated:
                         lease.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": LEASE_KEY})

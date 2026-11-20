@@ -248,22 +248,30 @@ class Deriv:
                 result.append(bar(opened, raw))
         return _ordered_unique(result)
 
-    async def history_ticks(self, instrument: str, limit: int = 200) -> list[dict]:
+    async def history_ticks(
+        self, instrument: str, limit: int = 200, *, start_at: int | None = None, end_at: int | None = None,
+    ) -> list[dict]:
         if not 1 <= limit <= 1000:
             raise VenueError("INVALID_HISTORY_RANGE")
+        if start_at is not None or end_at is not None:
+            if (type(start_at) is not int or type(end_at) is not int
+                    or not 0 < start_at < end_at <= min(9_999_999_999, int(time.time()))):
+                raise VenueError("INVALID_HISTORY_RANGE")
         payload = {
             "ticks_history": identifier(instrument, _SYMBOL),
-            "end": "latest",
+            "end": "latest" if end_at is None else str(end_at),
             "style": "ticks",
             "count": limit,
         }
+        if start_at is not None:
+            payload["start"] = start_at
         async with socket_session(_PUBLIC_WS, self._connect) as websocket:
             history = object_(await self._rpc(websocket, "history", payload))
         times = array(history.get("times"))
         prices = array(history.get("prices"))
         if len(times) != len(prices):
             raise VenueError("INVALID_RESPONSE")
-        return [
+        ticks = [
             {
                 "instrument": instrument,
                 "observed_at": number(timestamp),
@@ -272,6 +280,11 @@ class Deriv:
             }
             for timestamp, price in zip(times, prices, strict=True)
         ]
+        if start_at is not None and any(
+            not start_at <= tick["observed_at"] <= end_at or tick["price"] <= 0 for tick in ticks
+        ):
+            raise VenueError("INVALID_RESPONSE")
+        return ticks
 
     async def stream_ticks(self, instrument: str) -> AsyncIterator[dict]:
         """Read-only stream. Each retry begins with a fresh subscription."""

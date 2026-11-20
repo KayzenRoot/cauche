@@ -127,14 +127,16 @@ function ConnectionForm({ environment, exchange, connection, session }: {
   const observedCurrency = typeof currency === 'string' && /^[A-Z]{3}$/.test(currency) ? currency : undefined
   const formattedBalance = observedCurrency ? money(balance, observedCurrency) : number(balance, 6)
   const active = enabled ?? connection?.enabled ?? true
+  const canKeepDerivToken = import.meta.env.MODE === 'cauche-free' && exchange === 'DERIV' && connection?.configured
+  const keepDerivToken = Boolean(canKeepDerivToken && !draft.token)
+  const automaticAccount = Boolean(keepDerivToken && !isReal && draft.account_id === '')
   const action = useMutation({
     mutationFn: (kind: 'save' | 'remove' | 'test') => {
       if (kind === 'remove') return api<Connection>(path + params({ confirm: true }), { method: 'DELETE', session })
-      return api<Connection>(path + (kind === 'test' ? '/test' : ''), {
-        method: kind === 'test' ? 'POST' : 'PUT', session,
-        body: kind === 'test' ? { confirm: true }
-          : { enabled: active, confirm: true, credentials: Object.fromEntries(Object.entries(draft).filter(([, value]) => value !== '')) },
-      })
+      if (kind === 'test') return api<Connection>(path + '/test', { method: 'POST', session, body: { confirm: true } })
+      const credentials: Record<string, string | null> = Object.fromEntries(Object.entries(draft).filter(([, value]) => value !== ''))
+      if (automaticAccount) credentials.account_id = null
+      return api<Connection>(path, { method: 'PUT', session, body: { enabled: active, confirm: true, credentials } })
     },
     onSuccess: (_, kind) => {
       if (kind !== 'test') { setDraft({}); setEnabled(undefined) }
@@ -166,13 +168,23 @@ function ConnectionForm({ environment, exchange, connection, session }: {
       </div>}
       {!isReal && connection?.capabilities && (Array.isArray(connection.capabilities) ? connection.capabilities.length > 0 : Object.keys(connection.capabilities).length > 0) &&
         <details className="form-details"><summary>Recursos disponíveis</summary><pre>{JSON.stringify(connection.capabilities, null, 2)}</pre></details>}
+      {canKeepDerivToken && <p className="hint">Preencha os identificadores que deseja alterar. O campo de token em branco mantém o token salvo.</p>}
       {credentialFields(exchange, isReal).map(item => <label key={item.id}><span>{item.label}</span>
         {item.multiline ? <textarea rows={4} spellCheck={false} autoComplete="off" className="secret-key" required
           value={draft[item.id] ?? ''} onChange={event => setDraft(previous => ({ ...previous, [item.id]: event.target.value }))} />
-          : <input type={item.secret ? 'password' : 'text'} required={!item.optional}
+          : <input type={item.secret ? 'password' : 'text'} required={!item.optional && !keepDerivToken}
             value={draft[item.id] ?? ''} autoComplete={item.secret ? 'new-password' : 'off'}
             onChange={event => setDraft(previous => ({ ...previous, [item.id]: event.target.value }))} />}
       </label>)}
+      {keepDerivToken && !isReal && <label className="check-field">
+        <input type="checkbox" checked={automaticAccount} onChange={event => setDraft(previous => {
+          if (event.target.checked) return { ...previous, account_id: '' }
+          const next = { ...previous }
+          delete next.account_id
+          return next
+        })} />
+        <span>Selecionar automaticamente a conta demo</span>
+      </label>}
       <label className="check-field"><input type="checkbox" checked={active} onChange={event => setEnabled(event.target.checked)} /><span>Habilitar conexão</span></label>
       {action.isError && <Problem error={action.error} />}
       {action.isSuccess && <p className="feedback" role="status"><Check size={17} aria-hidden="true" /> {action.variables === 'test'

@@ -3,7 +3,8 @@ import { timingSafeEqual } from "node:crypto";
 import { privateResponse } from "./admission.mjs";
 import { RESEARCH_MODEL, ResearchError, inspectKalshi } from "./free-research.mjs";
 import { captureBook, journalPage, recordInspection } from "./free-research-journal.mjs";
-import { credentialsFor, getBalance } from "./free-venues.mjs";
+import { processSettlements, settlementStatus } from "./free-research-settlement.mjs";
+import { credentialsFor, getBalance, VenueVerificationError } from "./free-venues.mjs";
 
 const COOKIE = "__Host-cauche-free";
 const SECRET = /^[A-Za-z0-9_-]{43}$/;
@@ -193,13 +194,17 @@ async function connection(request, url, env, db, match, venueReader) {
       "SELECT enabled, ciphertext, revision FROM cauche_free.connections WHERE environment = $1 AND exchange = $2",
       scope,
     );
-    requireCondition(current?.enabled && current.ciphertext, 409, "NOT_CONFIGURED");
+    requireCondition(current?.ciphertext, 409, "BROKER_NOT_CONFIGURED");
+    requireCondition(current.enabled, 409, "CONNECTION_DISABLED");
     const credentials = await decrypt(env, aad, current.ciphertext);
     let verified;
+    let failure;
     try {
       verified = await venueReader(exchange, environment, credentials);
-    } catch {
-      verified = null;
+    } catch (error) {
+      failure = error instanceof VenueVerificationError
+        ? new HttpError(error.status, error.message)
+        : new HttpError(503, "VENUE_UNAVAILABLE");
     }
     const { rows: [updated] } = await db.query(
       "UPDATE cauche_free.connections SET status = $3, currency = $4, balance = $5, verified_at = now(), "
@@ -207,21 +212,34 @@ async function connection(request, url, env, db, match, venueReader) {
       [...scope, verified ? "VERIFIED" : "ERROR", verified?.currency ?? null, verified?.balance ?? null, current.revision],
     );
     requireCondition(updated, 409, "CONNECTION_CHANGED");
-    requireCondition(verified, 422, "ACCOUNT_NOT_VERIFIED");
+    if (failure) throw failure;
     return json(publicConnection(updated));
   }
 
   let ciphertext = null;
   let enabled = false;
   let keep = false;
+  let revision = null;
   if (request.method === "PUT") {
     requireCondition(typeof payload.enabled === "boolean", 422, "INVALID_REQUEST");
     enabled = payload.enabled;
     keep = payload.credentials && typeof payload.credentials === "object" && !Array.isArray(payload.credentials)
       && Object.keys(payload.credentials).length === 0;
     if (!keep) {
-      const credentials = credentialsFor(exchange, environment, payload.credentials);
-      requireCondition(credentials, 422, "INVALID_CREDENTIALS");
+      let input = payload.credentials;
+      if (exchange === "DERIV" && input && typeof input === "object" && !Array.isArray(input)
+        && !Object.hasOwn(input, "token") && Object.keys(input).every(key => key === "app_id" || key === "account_id")) {
+        const { rows: [current] } = await db.query(
+          "SELECT ciphertext, revision FROM cauche_free.connections WHERE environment = $1 AND exchange = $2", scope,
+        );
+        requireCondition(current?.ciphertext, 422, "DERIV_TOKEN_REQUIRED");
+        const stored = await decrypt(env, aad, current.ciphertext);
+        input = { ...stored, ...input };
+        if (environment === "BROKER_DEMO" && input.account_id === null) delete input.account_id;
+        revision = current.revision;
+      }
+      const credentials = credentialsFor(exchange, environment, input);
+      requireCondition(credentials, 422, "BROKER_CREDENTIAL_FORMAT");
       ciphertext = await encrypt(env, aad, credentials);
     }
   }
@@ -230,10 +248,12 @@ async function connection(request, url, env, db, match, venueReader) {
     "UPDATE cauche_free.connections SET ciphertext = CASE WHEN $4 THEN ciphertext ELSE $3::text END, enabled = $5, "
     + "status = CASE WHEN (CASE WHEN $4 THEN ciphertext ELSE $3::text END) IS NULL THEN 'NOT_CONFIGURED' "
     + "WHEN $5 THEN 'UNVERIFIED' ELSE 'DISABLED' END, currency = NULL, balance = NULL, verified_at = NULL, "
-    + "revision = revision + 1 WHERE environment = $1 AND exchange = $2 RETURNING " + PUBLIC_COLUMNS,
-    [...scope, ciphertext, Boolean(keep), enabled],
+    + "revision = revision + 1 WHERE environment = $1 AND exchange = $2 "
+    + "AND ($6::bigint IS NULL OR revision = $6) RETURNING " + PUBLIC_COLUMNS,
+    [...scope, ciphertext, Boolean(keep), enabled, revision],
   );
-  requireCondition(updated, 503, "SERVICE_UNAVAILABLE");
+  requireCondition(updated, revision === null ? 503 : 409,
+    revision === null ? "SERVICE_UNAVAILABLE" : "CONNECTION_CHANGED");
   return json(publicConnection(updated));
 }
 
@@ -254,8 +274,17 @@ async function startDb(env) {
   return db;
 }
 
-export function makeWorker({ connect = startDb, venueReader = getBalance, inspector = inspectKalshi, bookReader = captureBook } = {}) {
+export function makeWorker({ connect = startDb, venueReader = getBalance, inspector = inspectKalshi, bookReader = captureBook, settleDue = processSettlements } = {}) {
   return {
+    async scheduled(_event, env) {
+      if (!env.CAUCHE_DB?.connectionString) return;
+      const db = await connect(env);
+      try {
+        await settleDue(db);
+      } finally {
+        await db.end();
+      }
+    },
     async fetch(request, env, ctx) {
       const url = new URL(request.url);
       let db;
@@ -291,6 +320,12 @@ export function makeWorker({ connect = startDb, venueReader = getBalance, inspec
             response = json({ model: RESEARCH_MODEL, configured: Boolean(env.DEEPSEEK_API_KEY?.trim()) });
           } else if (path === "/api/research/evidence" && request.method === "GET") {
             response = json(await journalPage(db, url.searchParams));
+          } else if (path === "/api/research/settlements" && request.method === "GET") {
+            response = json(await settlementStatus(db));
+          } else if (path === "/api/research/settlements/refresh" && request.method === "POST") {
+            requireCondition((await readJson(request)).confirm === true, 400, "CONFIRM_REQUIRED");
+            await throttle(env.VENUE_LIMIT, "kalshi-settlement-refresh");
+            response = json(await settleDue(db));
           } else if (path === "/api/research/kalshi/inspect" && request.method === "POST") {
             await throttle(env.VENUE_LIMIT, "kalshi-research");
             const result = await inspector(await readJson(request), env.DEEPSEEK_API_KEY?.trim());

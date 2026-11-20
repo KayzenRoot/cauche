@@ -173,9 +173,18 @@ def research_evidence(session: Session, scope: Filters, limit: int, offset: int 
     """Paginate decisions, including NO_SIGNAL, with attributable fills and settlement."""
     statement = scoped(select(Signal), Signal, scope)
     total = session.scalar(select(func.count()).select_from(statement.with_only_columns(Signal.id).subquery()))
+    shadow_state = Signal.data["deriv_shadow"]["status"].as_string()
+    shadow_counts = dict(session.execute(scoped(
+        select(shadow_state, func.count()).where(
+            Signal.exchange == "DERIV", shadow_state.in_(("PENDING", "OBSERVED", "UNAVAILABLE")),
+        ).group_by(shadow_state),
+        Signal, scope,
+    )).all())
+    coverage = {status.lower(): shadow_counts.get(status, 0) for status in ("PENDING", "OBSERVED", "UNAVAILABLE")}
+    envelope = {"total": total, "offset": offset, "limit": limit, "deriv_shadow_coverage": coverage}
     page = list(session.scalars(statement.order_by(Signal.timestamp.desc(), Signal.id.desc()).limit(limit).offset(offset)))
     if not page:
-        return {"items": [], "total": total, "offset": offset, "limit": limit}
+        return {"items": [], **envelope}
     linked = session.execute(
         select(OrderIntent, Order, Settlement)
         .outerjoin(Order, Order.intent_id == OrderIntent.id)
@@ -208,7 +217,7 @@ def research_evidence(session: Session, scope: Filters, limit: int, offset: int 
             ),
             "settlement": record(settlement) if settlement else None,
         })
-    return jsonable({"items": items, "total": total, "offset": offset, "limit": limit})
+    return jsonable({"items": items, **envelope})
 
 
 def _amounts(session, scope):

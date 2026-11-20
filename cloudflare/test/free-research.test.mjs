@@ -67,3 +67,14 @@ test("future dates and invalid source URLs fail before network activity", async 
       "synthetic-api-key", fetcher, now), { status: 422, message: "INVALID_EVIDENCE" });
   }
 });
+
+
+test("public-only capture never uses a configured model key", async () => {
+  const result = await inspectKalshi({ ticker: "TEST-26", use_model: false }, "synthetic-key",
+    async url => {
+      assert.equal(url, marketUrl);
+      return Response.json(market);
+    }, now);
+  assert.equal(result.model_status, "SKIPPED");
+  assert.equal(result.extraction, null);
+});

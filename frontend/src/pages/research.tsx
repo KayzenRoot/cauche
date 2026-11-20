@@ -5,12 +5,16 @@ import { Activity, BookOpen, Download, FlaskConical, Play } from 'lucide-react'
 import { api } from '../api'
 import { Badge, DataTable, Empty, Loading, PageTitle, Problem } from '../components/common'
 import { dateTime, money, number, percent, valueText } from '../format'
+import type { Tone } from '../format'
 import { analyze, initialLimits, parseDataset, sampleDataset } from '../research'
 import type { Dataset, Metrics, Report, ResearchLimits } from '../research'
 import type { RecordData, Session } from '../types'
 
 type Input = { dataset: Dataset; label: string; synthetic: boolean }
-type Journal = { items: RecordData[]; total: number; offset: number; limit: number; dataset?: unknown }
+type ShadowCoverage = { pending: number; observed: number; unavailable: number }
+type Journal = { items: RecordData[]; total: number; offset: number; limit: number; dataset?: unknown; deriv_shadow_coverage?: ShadowCoverage }
+type SettlementCounts = { pending: number; settled: number; rules_changed: number; unavailable: number }
+type SettlementRefresh = { processed: number; settled: number }
 type ModelStatus = { model: string; configured: boolean }
 type Source = { id: string; url: string; published_at: string | null }
 type Inspection = {
@@ -19,7 +23,7 @@ type Inspection = {
   observed_at: string
   rules: { primary: string; secondary: string; closes_at: string | null }
   model: string | null
-  model_status?: 'EXTRACTED' | 'NOT_CONFIGURED' | 'NO_RULES' | 'UNAVAILABLE'
+  model_status?: 'EXTRACTED' | 'NOT_CONFIGURED' | 'NO_RULES' | 'UNAVAILABLE' | 'SKIPPED'
   journal_id?: string | number
   book?: {
     status: 'OBSERVED' | 'UNAVAILABLE'
@@ -56,6 +60,7 @@ const iso = (value: number) => Number.isFinite(value) ? new Date(value).toISOStr
 const record = (value: unknown): RecordData =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? value as RecordData : {}
 const string = (value: unknown) => typeof value === 'string' ? value : undefined
+const timeText = (value: unknown) => dateTime(typeof value === 'number' ? value : string(value))
 const secureUrl = (value: string) => {
   try {
     const url = new URL(value)
@@ -63,6 +68,106 @@ const secureUrl = (value: string) => {
   } catch {
     return undefined
   }
+}
+
+type OutcomeStatus = { label: string; tone: Tone }
+const officialStatus = new Map<string, OutcomeStatus>([
+  ['PENDING', { label: 'Liquidação pendente', tone: 'amber' }],
+  ['SETTLED', { label: 'Liquidada oficialmente', tone: 'green' }],
+  ['RULES_CHANGED', { label: 'Regras alteradas', tone: 'amber' }],
+  ['UNAVAILABLE', { label: 'Resultado indisponível', tone: 'red' }],
+])
+const shadowStatus = new Map<string, OutcomeStatus>([
+  ['PENDING', { label: 'Aguardando ticks públicos', tone: 'amber' }],
+  ['OBSERVED', { label: 'Resultado em sombra', tone: 'blue' }],
+  ['UNAVAILABLE', { label: 'Ticks insuficientes', tone: 'red' }],
+])
+const shadowDirections = new Map([
+  ['WIN', 'Variação a favor'], ['LOSS', 'Variação contra'], ['FLAT', 'Sem variação'],
+])
+const calibrationStatus = new Map([
+  ['INSUFFICIENT_OFFICIAL_DEMO_DATA', 'Liquidações demo insuficientes'],
+  ['UNALIGNED_CONTRACT_OR_REGIME', 'Cotação ou regime incompatível'],
+  ['HOLDOUT_CALIBRATION_FAILED', 'Calibração abaixo do mínimo no teste final'],
+  ['VALIDATED', 'Calibração validada'],
+])
+
+function JournalOutcome({ row }: {row: RecordData}) {
+  const data = record(row.data)
+  const official = record(data.resolution)
+  const shadow = record(data.deriv_shadow)
+  const status = officialStatus.get(string(official.status) ?? '')
+    ?? shadowStatus.get(string(shadow.status) ?? '')
+  const result = string(official.result ?? official.outcome)
+  const direction = shadowDirections.get(string(record(shadow.resolution).direction) ?? '')
+  if (!status) return valueText(result ?? record(row.settlement).status)
+  return <><Badge tone={status.tone}>{status.label}</Badge>
+    {(result || direction) && <><br /><small>{direction ?? valueText(result)}</small></>}
+  </>
+}
+
+function JournalDetails({ row }: {row: RecordData}) {
+  const data = record(row.data)
+  const official = record(data.resolution)
+  const shadow = record(data.deriv_shadow)
+  const observed = record(shadow.resolution)
+  const calibration = record(record(data.expectancy).calibration)
+  const calibrationLabel = calibrationStatus.get(string(calibration.status) ?? '')
+  const source = string(official.source)
+  const sourceUrl = source && secureUrl(source)
+  const shadowSource = string(shadow.source)
+  return <details><summary>Ver detalhes</summary>
+    <dl className="details-list">
+      {source && <div><dt>Fonte da liquidação</dt><dd>{sourceUrl ? <a className="quiet-link research-source" href={sourceUrl} target="_blank" rel="noreferrer">{source}</a> : valueText(source)}</dd></div>}
+      {official.settled_at != null && <div><dt>Liquidação oficial</dt><dd>{timeText(official.settled_at)}</dd></div>}
+      {official.observed_at != null && <div><dt>Resultado consultado em</dt><dd>{timeText(official.observed_at)}</dd></div>}
+      {shadowSource && <div><dt>Fonte do resultado em sombra</dt><dd>{shadowSource === 'DERIV_PUBLIC_TICK_PROXY' ? 'Ticks públicos da Deriv' : valueText(shadowSource)}</dd></div>}
+      {shadow.expires_at != null && <div><dt>Vencimento de referência</dt><dd>{timeText(shadow.expires_at)}{shadow.expiry_basis === 'ASSUMED_DURATION' && ' · estimado pela duração'}</dd></div>}
+      {observed.entry_at != null && <div><dt>Tick de entrada</dt><dd>{valueText(observed.entry_spot)} · {timeText(observed.entry_at)}</dd></div>}
+      {observed.exit_at != null && <div><dt>Tick de saída</dt><dd>{valueText(observed.exit_spot)} · {timeText(observed.exit_at)}</dd></div>}
+      {calibrationLabel && <div><dt>Calibração para entrada</dt><dd>{calibrationLabel}</dd></div>}
+    </dl>
+    <pre className="research-json">{JSON.stringify(row, null, 2)}</pre>
+  </details>
+}
+
+function SettlementTracking({ session }: {session: Session}) {
+  const client = useQueryClient()
+  const counts = useQuery({
+    queryKey: ['research-settlements'],
+    queryFn: ({ signal }) => api<SettlementCounts>('/research/settlements', { signal }),
+    retry: false,
+  })
+  const refresh = useMutation({
+    mutationFn: () => api<SettlementRefresh>('/research/settlements/refresh', { method: 'POST', body: { confirm: true }, session }),
+    onSuccess: () => Promise.all([
+      client.invalidateQueries({ queryKey: ['research-settlements'] }),
+      client.invalidateQueries({ queryKey: ['research-evidence'] }),
+    ]),
+  })
+  const data = counts.data
+  const hasMarkets = data && (data.pending > 0 || data.settled > 0 || data.rules_changed > 0 || data.unavailable > 0)
+  return <section className="panel" aria-label="Acompanhamento de liquidações">
+    <div className="panel-heading"><div><h2>Liquidações da Kalshi</h2><p>A checagem usa dados públicos da Kalshi e não consome créditos do DeepSeek.</p></div></div>
+    {counts.isPending ? <Loading compact /> : counts.isError ? <Problem error={counts.error} retry={() => void counts.refetch()} />
+      : data && (hasMarkets ? <>
+        <dl className="metrics-detail">
+          <div><dt>Pendentes</dt><dd>{number(data.pending, 0)}</dd></div>
+          <div><dt>Liquidadas</dt><dd>{number(data.settled, 0)}</dd></div>
+          <div><dt>Regras alteradas</dt><dd>{number(data.rules_changed, 0)}</dd></div>
+          <div><dt>Indisponíveis</dt><dd>{number(data.unavailable, 0)}</dd></div>
+        </dl>
+        <div className="form-body">
+          {data.pending > 0 && <button type="button" disabled={refresh.isPending} onClick={() => refresh.mutate()}>
+            <Activity size={15} aria-hidden="true" /> {refresh.isPending ? 'Consultando…' : 'Checar liquidações agora'}
+          </button>}
+          {refresh.isError && <Problem error={refresh.error} retry={() => refresh.mutate()} />}
+          {refresh.data && <p role="status" className="hint">{refresh.data.processed === 0
+            ? 'Nenhum mercado estava no horário de checagem.'
+            : `Mercados consultados ${number(refresh.data.processed, 0)} · Liquidações confirmadas ${number(refresh.data.settled, 0)}`}</p>}
+        </div>
+      </> : <Empty title="Nenhum mercado acompanhado" description="Consulte um mercado em Pesquisa Kalshi para acompanhar o resultado." />)}
+  </section>
 }
 
 function downloadJson(filename: string, data: unknown) {
@@ -198,7 +303,7 @@ function ForecastReport({ report, currency }: {report: Report; currency: string}
   </>
 }
 
-function QuantitativeStudy() {
+function QuantitativeStudy({ session }: {session: Session}) {
   const [input, setInput] = useState<Input>()
   const [error, setError] = useState<unknown>()
   const [limits, setLimits] = useState<Record<keyof ResearchLimits, string>>({
@@ -281,6 +386,7 @@ function QuantitativeStudy() {
         <button type="submit" className="button-primary" disabled={!input}><Play size={15} aria-hidden="true" /> Executar validação</button>
       </div>
     </form>
+    {freeProfile && <SettlementTracking session={session} />}
     {offset !== null && <section className="panel">
       <div className="panel-heading records-heading"><div><h2>Diário de evidências</h2><p>{freeProfile ? 'Consultas públicas da Kalshi registradas com horário, regras e livro de ofertas.' : 'Decisões observadas pelo motor, inclusive sinais descartados.'}</p></div>
         {journal.data && <div className="buttons">
@@ -295,14 +401,22 @@ function QuantitativeStudy() {
       </div>
       {journal.isPending ? <Loading /> : journal.isError ? <Problem error={journal.error} retry={() => void journal.refetch()} />
         : journal.data && <>
-          <DataTable title="Evidências do motor" empty="Nenhuma decisão registrada" rows={journal.data.items} columns={[
+          {journal.data.deriv_shadow_coverage && <section aria-label="Cobertura em sombra da Deriv">
+            <div className="panel-heading"><div><h3>Resultados em sombra da Deriv</h3><p>A elegibilidade para ordens usa liquidações da demo oficial.</p></div></div>
+            <dl className="metrics-detail">
+              <div><dt>Pendentes</dt><dd>{number(journal.data.deriv_shadow_coverage.pending, 0)}</dd></div>
+              <div><dt>Observados</dt><dd>{number(journal.data.deriv_shadow_coverage.observed, 0)}</dd></div>
+              <div><dt>Indisponíveis</dt><dd>{number(journal.data.deriv_shadow_coverage.unavailable, 0)}</dd></div>
+            </dl>
+          </section>}
+          <DataTable title={freeProfile ? 'Evidências de mercado' : 'Evidências do motor'} empty={freeProfile ? 'Nenhuma observação registrada' : 'Nenhuma decisão registrada'} rows={journal.data.items} columns={[
             { key: 'instrument', label: 'Mercado', value: row => valueText(row.instrument) },
             { key: 'mode', label: 'Modo', value: row => valueText(row.mode) },
-            { key: 'timestamp', label: 'Decisão em', value: row => dateTime(typeof row.timestamp === 'number' ? row.timestamp : string(row.timestamp)) },
-            { key: 'reason', label: 'Motivo', value: row => valueText(row.reason) },
-            { key: 'execution', label: 'Execução', value: row => valueText(record(row.execution).status) },
-            { key: 'data', label: 'Registro', value: row => <details><summary>Ver detalhes</summary>
-              <pre className="research-json">{JSON.stringify(row, null, 2)}</pre></details> },
+            { key: 'timestamp', label: freeProfile ? 'Observado em' : 'Decisão em', value: row => timeText(row.timestamp) },
+            { key: 'reason', label: 'Motivo', value: row => row.reason === 'REVIEW_REQUIRED' ? 'Revisão humana pendente' : valueText(row.reason) },
+            ...(!freeProfile ? [{ key: 'execution', label: 'Execução', value: (row: RecordData) => valueText(record(row.execution).status) }] : []),
+            { key: 'resolution', label: 'Resultado', value: row => <JournalOutcome row={row} /> },
+            { key: 'data', label: 'Registro', value: row => <JournalDetails row={row} /> },
           ]} />
           {journal.data.total > journalLimit && <div className="pagination">
             <button type="button" disabled={offset <= 0} onClick={() => setOffset(Math.max(0, offset - journalLimit))}>Anterior</button>
@@ -331,6 +445,7 @@ function KalshiResearch({ session }: {session: Session}) {
   const client = useQueryClient()
   const [sourceError, setSourceError] = useState<Error>()
   const [ticker, setTicker] = useState('')
+  const [useModel, setUseModel] = useState(true)
   const [sources, setSources] = useState<SourceDraft[]>([])
   const model = useQuery({
     queryKey: ['research-status'],
@@ -338,9 +453,12 @@ function KalshiResearch({ session }: {session: Session}) {
     retry: false,
   })
   const inspect = useMutation({
-    mutationFn: (body: { ticker: string; sources?: { url: string; published_at: string; text: string }[] }) =>
+    mutationFn: (body: { ticker: string; use_model: boolean; sources?: { url: string; published_at: string; text: string }[] }) =>
       api<Inspection>('/research/kalshi/inspect', { method: 'POST', body, session }),
-    onSuccess: () => { void client.invalidateQueries({ queryKey: ['research-evidence'] }) },
+    onSuccess: () => Promise.all([
+      client.invalidateQueries({ queryKey: ['research-evidence'] }),
+      ...(freeProfile ? [client.invalidateQueries({ queryKey: ['research-settlements'] })] : []),
+    ]),
   })
   const submit = (event: FormEvent) => {
     event.preventDefault()
@@ -354,7 +472,10 @@ function KalshiResearch({ session }: {session: Session}) {
     const published = submitted.map(source => ({
       url: source.url, published_at: new Date(source.timestamp).toISOString(), text: source.text,
     }))
-    inspect.mutate({ ticker: ticker.trim().toUpperCase(), ...(published.length ? { sources: published } : {}) })
+    inspect.mutate({
+      ticker: ticker.trim().toUpperCase(), use_model: useModel && model.data?.configured === true,
+      ...(published.length ? { sources: published } : {}),
+    })
   }
   const result = inspect.data
   const unavailable = {
@@ -375,6 +496,10 @@ function KalshiResearch({ session }: {session: Session}) {
         {model.isError && <Problem error={model.error} retry={() => void model.refetch()} />}
         <label><span>Código do mercado Kalshi</span><input autoCapitalize="characters" value={ticker} onChange={event => setTicker(event.target.value)}
           required pattern={'[A-Za-z0-9][A-Za-z0-9._\\-]{0,99}'} maxLength={100} placeholder="Ticker oficial" /></label>
+        {model.data?.configured && <label className="check-field">
+          <input type="checkbox" checked={useModel} onChange={event => setUseModel(event.target.checked)} />
+          <span>Analisar com DeepSeek</span>
+        </label>}
         {sources.map((source, index) => <fieldset className="research-fieldset" key={index}>
           <legend>Fonte {index + 1}</legend>
           <label><span>URL pública em HTTPS</span><input type="url" pattern="https://.+" maxLength={600} required value={source.url} onChange={event =>
@@ -389,7 +514,7 @@ function KalshiResearch({ session }: {session: Session}) {
           <button type="button" disabled={sources.length >= 4} onClick={() => setSources(previous => [...previous, { url: '', published: '', text: '' }])}>Adicionar fonte pública</button>
           <button className="button-primary" type="submit" disabled={inspect.isPending}>{inspect.isPending ? 'Consultando…' : 'Consultar evidências'}</button>
         </div>
-        {model.data?.configured && <p className="hint">As regras públicas e os trechos adicionados são enviados ao DeepSeek para extração de citações.</p>}
+        {model.data?.configured && useModel && <p className="hint">As regras públicas e os trechos adicionados são enviados ao DeepSeek para extração de citações.</p>}
         {sourceError && <Problem error={sourceError} />}
         {inspect.isError && <Problem error={inspect.error} />}
       </div>
@@ -432,8 +557,10 @@ function KalshiResearch({ session }: {session: Session}) {
             const source = result.sources.find(item => item.id === fact.source_id)
             return <li key={index}><strong>{fact.claim}</strong><blockquote>{fact.quote}</blockquote>{source && <SourceLink source={source} />}</li>
           })}</ol>
-        </> : <Empty title="Extração por IA indisponível" description={result.model_status && result.model_status !== 'EXTRACTED'
-          ? unavailable[result.model_status] : 'As regras acima vieram da consulta oficial.'} />}
+        </> : result.model_status === 'SKIPPED'
+          ? <p className="hint">Consulta pública sem análise do DeepSeek.</p>
+          : <Empty title="Extração por IA indisponível" description={result.model_status && result.model_status !== 'EXTRACTED'
+            ? unavailable[result.model_status] : 'As regras acima vieram da consulta oficial.'} />}
       </div>
     </section>}
   </>
@@ -447,7 +574,7 @@ export function ResearchPage({ session }: { session: Session }) {
       <button type="button" aria-pressed={section === 'quant'} onClick={() => setSection('quant')}>Validação quantitativa</button>
       <button type="button" aria-pressed={section === 'kalshi'} onClick={() => setSection('kalshi')}>Pesquisa Kalshi</button>
     </div>
-    <div className="page-stack research-view" hidden={section !== 'quant'}><QuantitativeStudy /></div>
+    <div className="page-stack research-view" hidden={section !== 'quant'}><QuantitativeStudy session={session} /></div>
     {section === 'kalshi' && <KalshiResearch session={session} />}
   </>
 }

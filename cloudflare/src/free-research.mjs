@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 
 export const RESEARCH_MODEL = "deepseek-flash";
 const KALSHI = "https://external-api.kalshi.com/trade-api/v2/markets/";
+const KALSHI_HISTORY = "https://external-api.kalshi.com/trade-api/v2/historical/markets/";
 const DEEPSEEK = "https://api.deepseek.com/chat/completions";
 const TICKER = /^[A-Z0-9][A-Z0-9._-]{0,99}$/;
 const TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -45,7 +46,8 @@ function validSourceUrl(value) {
 function evidenceInput(payload, now) {
   const ticker = typeof payload.ticker === "string" ? payload.ticker.trim().toUpperCase() : "";
   const list = payload.sources === undefined ? [] : payload.sources;
-  if (!TICKER.test(ticker) || !Array.isArray(list) || list.length > 4) {
+  if (!TICKER.test(ticker) || !Array.isArray(list) || list.length > 4
+    || (payload.use_model !== undefined && typeof payload.use_model !== "boolean")) {
     throw new ResearchError(422, "INVALID_EVIDENCE");
   }
   const urls = new Set();
@@ -57,7 +59,7 @@ function evidenceInput(payload, now) {
     urls.add(source.url);
     return { id: "source-" + (index + 1), url: source.url, published_at: published, text };
   });
-  return { ticker, sources };
+  return { ticker, sources, useModel: payload.use_model !== false };
 }
 
 export async function responseJson(response, maximumBytes) {
@@ -84,9 +86,11 @@ export async function responseJson(response, maximumBytes) {
   }
 }
 
-async function marketRules(ticker, fetcher) {
+export async function marketRules(ticker, fetcher = fetch, { historical = false } = {}) {
+  if (!TICKER.test(ticker)) throw new ResearchError(422, "INVALID_EVIDENCE");
+  const source = (historical ? KALSHI_HISTORY : KALSHI) + ticker;
   try {
-    const response = await fetcher(KALSHI + ticker, {
+    const response = await fetcher(source, {
       method: "GET", headers: { Accept: "application/json" },
       redirect: "manual", signal: AbortSignal.timeout(7000),
     });
@@ -99,6 +103,7 @@ async function marketRules(ticker, fetcher) {
       secondary: nullableText(market.rules_secondary, 8000) ?? "",
       closes_at: optionalTime(market.close_time),
       event_ticker: nullableText(market.event_ticker, 100),
+      source,
       status: nullableText(market.status, 32),
       result: ["yes", "no"].includes(market.result) ? market.result : null,
       settled_at: optionalTime(market.settlement_ts),
@@ -166,19 +171,19 @@ async function extract(key, ticker, rules, sources, fetcher) {
 }
 
 export async function inspectKalshi(payload, key, fetcher = fetch, now = null) {
-  const { ticker, sources } = evidenceInput(payload, now ?? new Date());
+  const { ticker, sources, useModel } = evidenceInput(payload, now ?? new Date());
   const { primary, secondary, closes_at, ...market } = await marketRules(ticker, fetcher);
   const rules = { primary, secondary, closes_at };
   const observed_at = (now ?? new Date()).toISOString();
   const evidence = [{
     id: "kalshi", url: KALSHI + ticker, published_at: null, text: [rules.primary, rules.secondary].join("\n"),
   }, ...sources];
-  const extraction = key && rules.primary ? await extract(key, ticker, rules, evidence, fetcher) : null;
+  const extraction = useModel && key && rules.primary ? await extract(key, ticker, rules, evidence, fetcher) : null;
   return {
     ticker, decision_status: "REVIEW_REQUIRED", observed_at, rules, market,
     model: extraction ? RESEARCH_MODEL : null,
     sources: evidence.map(({ id, url, published_at }) => ({ id, url, published_at })),
     extraction,
-    model_status: extraction ? "EXTRACTED" : !key ? "NOT_CONFIGURED" : !rules.primary ? "NO_RULES" : "UNAVAILABLE",
+    model_status: extraction ? "EXTRACTED" : !useModel ? "SKIPPED" : !key ? "NOT_CONFIGURED" : !rules.primary ? "NO_RULES" : "UNAVAILABLE",
   };
 }

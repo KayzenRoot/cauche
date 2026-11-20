@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .db import aware, utcnow
+from .deriv_shadow import capture_candidate
 from .domain import Decision, Market, RiskState, SimFill, check_risk, settle, simulate_fill, validate_limits
 from .quant.indicators import adx, atr, closed_bars
 from .serialization import jsonable
@@ -429,10 +430,11 @@ def record_decision(
         return None
     # For Deriv the exact closed candles are actual strategy inputs. Kalshi uses
     # executable top-of-book depth, market rules, related book and its forecast.
+    recorded_at = utcnow()
     evidence = {
         "observed_at": market.timestamp,
         "received_at": jsonable(observation_received_at),
-        "recorded_at": jsonable(utcnow()),
+        "recorded_at": jsonable(recorded_at),
         "source": market.source,
         "event": market.event,
         "slot": slot,
@@ -458,6 +460,7 @@ def record_decision(
             candle.as_dict() for candle in market.confirmation if candle.closed and candle.time <= market.timestamp
         ]
     resolution = market_resolution(market)
+    deriv_shadow = capture_candidate(market, decision, expectancy.get("candidate_side"), recorded_at)
     record = Signal(
         **scope(bot, moment(market.timestamp)), id=identifier, version=version,
         direction=decision.side or "NO_SIGNAL", reason=decision.reason,
@@ -465,6 +468,7 @@ def record_decision(
             **decision.as_dict(), "evidence": evidence,
             "expectancy": expectancy, "shadow": shadows or [],
             **({"resolution": resolution} if resolution else {}),
+            **({"deriv_shadow": deriv_shadow} if deriv_shadow else {}),
             "market_time": market.candles[-1].time if market.exchange == "DERIV" and market.candles else market.timestamp,
         },
     )

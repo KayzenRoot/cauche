@@ -8,7 +8,7 @@ from typing import Annotated
 from urllib.parse import urlsplit
 
 import httpx
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictBool, StringConstraints, field_validator
 
 MODEL = "deepseek-flash"
 MARKET_URL = "https://external-api.kalshi.com/trade-api/v2/markets/"
@@ -65,6 +65,7 @@ class EvidenceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ticker: Ticker
+    use_model: StrictBool = True
     sources: Annotated[list[EvidenceSource], Field(max_length=4)] = Field(default_factory=list)
 
 
@@ -187,11 +188,12 @@ async def inspect_kalshi(payload: EvidenceRequest, *, transport=None):
             dict(source.model_dump(mode="json"), id=f"source-{index}")
             for index, source in enumerate(payload.sources, 1)
         )]
-        extraction = await extract(client, payload.ticker, rules, evidence, key) if key and rules["primary"] else None
+        extraction = await extract(client, payload.ticker, rules, evidence, key) if payload.use_model and key and rules["primary"] else None
     return {
         "ticker": payload.ticker, "decision_status": "REVIEW_REQUIRED", "observed_at": observed_at,
         "rules": rules, "model": MODEL if extraction else None, "extraction": extraction,
         "sources": [{key: value for key, value in row.items() if key != "text"} for row in evidence],
-        "model_status": ("EXTRACTED" if extraction else "NOT_CONFIGURED" if not key
+        "model_status": ("EXTRACTED" if extraction else "SKIPPED" if not payload.use_model
+                         else "NOT_CONFIGURED" if not key
                          else "NO_RULES" if not rules["primary"] else "UNAVAILABLE"),
     }

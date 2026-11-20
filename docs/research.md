@@ -6,8 +6,8 @@ A aba **Inteligência** está disponível no terminal e no console Cloudflare Fr
 
 1. No terminal Docker, rode **Replay** ou **Backtests** para observar a estratégia antes de usar a demo. O diário registra sinais aceitos e descartados, horários, fontes, termos observados, revisões de risco, estimativa conservadora de valor esperado quando disponível, resultados e execução.
 2. Confira no backtest as janelas de treino, validação e teste, a janela final reservada, os candidatos avaliados, a qualidade da execução e a comparação de calibração entre referência, regressão logística e árvore. Os modelos candidatos de pesquisa ficam em sombra. O motor exige evidência suficiente e vantagem líquida conservadora ao avaliar novas entradas com dados de mercado.
-3. No Cloudflare Free, consultar uma regra da Kalshi registra no PostgreSQL os dados públicos observados naquele momento e até cinco níveis por lado do livro quando disponível. A consulta é sob demanda. O console também aceita arquivos de pesquisa para calcular resultados sem rodar a CPU de um backtest no Worker.
-4. Na demo oficial, verifique e configure a conta da corretora no terminal Docker, seguindo o fluxo de autenticação dela. Compare a execução observada com a simulação e mantenha a causa de bloqueios de risco visível. O modo de conta real do console faz consultas de leitura. O motor contínuo permanece no terminal Docker.
+3. No Cloudflare Free, consultar uma regra da Kalshi registra no PostgreSQL os dados públicos observados naquele momento e até cinco níveis por lado do livro quando disponível. A consulta é sob demanda. O console também aceita arquivos de pesquisa para calcular resultados sem rodar a CPU de um backtest no Worker. A fila consulta a liquidação oficial da Kalshi a cada 15 minutos, em lotes de até três mercados vencidos. Cada resultado fica vinculado às regras observadas pela captura. Mudanças de regra e resultados indisponíveis ficam visíveis no diário.
+4. Na demo oficial, verifique e configure a conta da corretora no terminal Docker, seguindo o fluxo de autenticação dela. Compare a execução observada com a simulação e mantenha a causa de bloqueios de risco visível. O modo de conta real do console faz consultas de leitura. O motor contínuo permanece no terminal Docker. Em Paper e Demo, o diário pode maturar candidatos Deriv com ticks públicos observados após a janela de vencimento. Esse resultado direcional é identificado como sombra. O calibrador da Deriv usa liquidações oficiais elegíveis para liberar entradas.
 
 ## DeepSeek V4.1 Flash
 
@@ -20,6 +20,6 @@ cd cloudflare
 npx wrangler secret put DEEPSEEK_API_KEY --config wrangler.free.jsonc
 ```
 
-A chamada direta usa a conta DeepSeek do proprietário e a tarifação do fornecedor. O plano de hospedagem pode permanecer gratuito. Sem a chave, o painel consulta e registra regras e livro da Kalshi e indica a ausência de extração pelo modelo.
+A opção de IA usa a conta DeepSeek do proprietário e a tarifação do fornecedor. Consultas públicas e a fila de liquidação funcionam com as APIs da Kalshi. O plano de hospedagem pode permanecer gratuito. Sem a chave, o painel consulta e registra regras e livro da Kalshi e indica a ausência de extração pelo modelo.
 
 [DeepSeek API](https://api-docs.deepseek.com/en/) · [Regras na API da Kalshi](https://docs.kalshi.com/api-reference/market/get-market) · [Livro de ofertas da Kalshi](https://docs.kalshi.com/api-reference/market/get-market-orderbook)
