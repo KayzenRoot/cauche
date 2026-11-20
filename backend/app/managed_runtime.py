@@ -163,7 +163,8 @@ def supervise() -> int:
         processes.append(subprocess.Popen([sys.executable, "-m", "app.worker"]))
         processes.append(subprocess.Popen([
             sys.executable, "-m", "uvicorn", "app.managed_runtime:http_application",
-            "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-access-log",
+            # The private Container binding connects to the container network interface.
+            "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-access-log",  # nosec B104
         ]))
         while not stopped.wait(0.25):
             if any(child.poll() is not None for child in processes):

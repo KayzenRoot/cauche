@@ -143,6 +143,7 @@ test('backtest result and encrypted connection settings through the interface', 
   await deriv.getByLabel('ID do aplicativo', { exact: true }).fill('synthetic-real-app');
   await deriv.getByLabel('Token da conta real', { exact: true }).fill('synthetic-real-fixture');
   await deriv.getByLabel('ID da conta real', { exact: true }).fill('DOT-TEST-REAL');
+  await deriv.getByRole('checkbox', { name: 'Habilitar conexão', exact: true }).check();
   await deriv.getByRole('button', { name: 'Salvar conexão' }).click();
   await confirm(page);
   await expect(deriv.getByText('Configuração salva')).toBeVisible();
