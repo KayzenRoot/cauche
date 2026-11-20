@@ -37,8 +37,9 @@ from .models import (
 from .models import Session as StoredSession
 from .queries import (
     Filters, connection, connections, dashboard, event_page, filters, history, instruments, market,
-    scope_for_bot, scoped,
+    research_evidence, scope_for_bot, scoped,
 )
+from .research import MODEL, EvidenceRequest, ResearchError, inspect_kalshi, model_key
 from .schemas import (
     BacktestInput, ChangePassword, Confirm, ConnectionUpdate, Exchange, Launch, Login,
     Mode, RiskUpdate, StrategyId, StrategyUpdate, boundary,
@@ -170,6 +171,28 @@ def change_password(payload: ChangePassword, owner: Write, db: Db, response: Res
     db.commit()
     clear_cookie(response)
     return {"status": "LOGGED_OUT"}
+
+
+@app.get("/api/research/evidence")
+def research_journal(
+    db: Db, _owner: Admin, scope: Scope,
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    offset: Annotated[int, Query(ge=0, le=100000)] = 0,
+):
+    return research_evidence(db, scope, limit, offset)
+
+
+@app.get("/api/research/status")
+def research_status(_owner: Admin):
+    return {"model": MODEL, "configured": bool(model_key())}
+
+
+@app.post("/api/research/kalshi/inspect")
+async def research_kalshi(payload: EvidenceRequest, _owner: AdminWrite):
+    try:
+        return await inspect_kalshi(payload)
+    except ResearchError as error:
+        raise HTTPException(error.status, str(error)) from None
 
 
 @app.get("/api/bot")

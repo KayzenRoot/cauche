@@ -2,7 +2,7 @@
 
 The initial owner-only account console runs at [cauche-pulse.kayzendev.workers.dev](https://cauche-pulse.kayzendev.workers.dev). Cloudflare Workers serves the interface and API. Hyperdrive connects to the dedicated Supabase PostgreSQL project in São Paulo. There are no cron jobs, containers, or paid services in this profile.
 
-The owner can save, verify, and disconnect Deriv and Kalshi accounts from **Configurações da conta**. The demo and real tabs have independent encrypted credentials. Verification reads the selected account balance. The real Deriv account ID must identify an active real Options account. The free profile does not expose backtest, replay, dashboard, or order endpoints.
+The owner can save, verify, and disconnect Deriv and Kalshi accounts from **Configurações da conta**. The demo and real tabs have independent encrypted credentials. Verification reads the selected account balance. The real Deriv account ID must identify an active real Options account. The free profile includes the [research workspace](research.md) for browser-based research and public Kalshi evidence capture. The Python runtime runs broker demo execution and strategy backtests.
 
 ## Build and test
 
@@ -17,7 +17,7 @@ npx wrangler deploy --config wrangler.free.jsonc --dry-run
 
 ## Provision and update
 
-1. Apply the [free schema migration](../deploy/supabase/0002_free_account_settings.sql) to the dedicated Supabase project. Keep the schema outside the Data API. Enable login on its dedicated runtime role with an independently generated database password.
+1. Apply the [free account schema](../deploy/supabase/0002_free_account_settings.sql) and [research journal migration](../deploy/supabase/0003_free_research_journal.sql) to the dedicated Supabase project. Keep the schema outside the Data API. Enable login on its dedicated runtime role with an independently generated database password.
 2. Upload the public Supabase CA to Cloudflare. Create a Hyperdrive configuration using the direct PostgreSQL endpoint, the dedicated role, the imported CA, and `--sslmode verify-full --caching-disabled`. Assign its ID to the `CAUCHE_DB` binding.
 3. Set Worker secrets `APP_ORIGIN`, `CAUCHE_OWNER_EMAIL`, `CAUCHE_OWNER_PASSWORD_HASH`, and `CAUCHE_FREE_KEY`. Generate 32 random bytes encoded as base64url for the owner password and store its lowercase SHA-256 hex digest. Generate another 32 random bytes encoded as standard base64 for the encryption key. Preserve an encrypted backup of the encryption key before storing broker credentials.
 4. Deploy with `npx wrangler deploy --config wrangler.free.jsonc`. For initial provisioning, pass the secret JSON from a private location with `--secrets-file`. Later deployments preserve the Worker secrets. The free and managed configurations share the same Worker name and should only be deployed during an intentional profile change.

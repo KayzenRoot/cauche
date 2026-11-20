@@ -1,6 +1,8 @@
 import pg from "pg";
 import { timingSafeEqual } from "node:crypto";
 import { privateResponse } from "./admission.mjs";
+import { RESEARCH_MODEL, ResearchError, inspectKalshi } from "./free-research.mjs";
+import { captureBook, journalPage, recordInspection } from "./free-research-journal.mjs";
 import { credentialsFor, getBalance } from "./free-venues.mjs";
 
 const COOKIE = "__Host-cauche-free";
@@ -252,7 +254,7 @@ async function startDb(env) {
   return db;
 }
 
-export function makeWorker({ connect = startDb, venueReader = getBalance } = {}) {
+export function makeWorker({ connect = startDb, venueReader = getBalance, inspector = inspectKalshi, bookReader = captureBook } = {}) {
   return {
     async fetch(request, env, ctx) {
       const url = new URL(request.url);
@@ -285,6 +287,16 @@ export function makeWorker({ connect = startDb, venueReader = getBalance } = {})
           } else if (path === "/api/auth/logout" && request.method === "POST") {
             await db.query("DELETE FROM cauche_free.sessions WHERE token_hash = $1", [tokenHash]);
             response = new Response(null, { status: 204, headers: { "Set-Cookie": cookie("", 0) } });
+          } else if (path === "/api/research/status" && request.method === "GET") {
+            response = json({ model: RESEARCH_MODEL, configured: Boolean(env.DEEPSEEK_API_KEY?.trim()) });
+          } else if (path === "/api/research/evidence" && request.method === "GET") {
+            response = json(await journalPage(db, url.searchParams));
+          } else if (path === "/api/research/kalshi/inspect" && request.method === "POST") {
+            await throttle(env.VENUE_LIMIT, "kalshi-research");
+            const result = await inspector(await readJson(request), env.DEEPSEEK_API_KEY?.trim());
+            const book = await bookReader(result.ticker);
+            const journal_id = await recordInspection(db, result, book);
+            response = json({ ...result, book, journal_id });
           } else if (match) {
             response = await connection(request, url, env, db, match, venueReader);
           } else {
@@ -292,7 +304,7 @@ export function makeWorker({ connect = startDb, venueReader = getBalance } = {})
           }
         }
       } catch (error) {
-        response = error instanceof HttpError
+        response = error instanceof HttpError || error instanceof ResearchError
           ? json({ detail: error.message }, error.status)
           : json({ detail: "SERVICE_UNAVAILABLE" }, 503);
       } finally {

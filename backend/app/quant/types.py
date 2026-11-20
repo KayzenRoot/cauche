@@ -64,6 +64,9 @@ class DerivQuote(WireRecord):
     stake: Decimal
     payout: Decimal
     duration_seconds: int
+    observed_at: int | None = None
+    spot: Decimal | None = None
+    expires_at: int | None = None
 
 
 @dataclass(frozen=True)
@@ -172,6 +175,13 @@ class Relation(WireRecord):
 
 
 @dataclass(frozen=True)
+class BookLevel(WireRecord):
+    side: str
+    price: Decimal
+    size: Decimal
+
+
+@dataclass(frozen=True)
 class Market(WireRecord):
     exchange: str
     instrument: str
@@ -191,6 +201,7 @@ class Market(WireRecord):
     rules_id: str = ""
     closes_at: int | None = None
     granularity: int = 300
+    book_levels: tuple[BookLevel, ...] = ()
 
     @property
     def simulated(self) -> bool:

@@ -48,6 +48,7 @@ export class CaucheRuntime extends DurableObject {
         CAUCHE_MASTER_KEY: this.env.CAUCHE_MASTER_KEY,
         LOG_RETENTION_DAYS: this.env.LOG_RETENTION_DAYS ?? "90",
       };
+      if (this.env.DEEPSEEK_API_KEY) envVars.DEEPSEEK_API_KEY = this.env.DEEPSEEK_API_KEY;
       if (this.env.CAUCHE_BOOTSTRAP_PASSWORD) {
         envVars.CAUCHE_BOOTSTRAP_PASSWORD = this.env.CAUCHE_BOOTSTRAP_PASSWORD;
       }

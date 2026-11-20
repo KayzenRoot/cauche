@@ -15,11 +15,15 @@ from .domain import check_risk, evaluate, validate_parameters
 from .execution import (
     amount,
     check_context,
+    deriv_settlement_calibration,
     emit,
+    entry_gate,
     execute_simulation,
     execution_inventory,
+    portfolio_pause,
     propose,
     record_decision,
+    resolve_market_signals,
     risk_violation,
     save_balance,
     save_market,
@@ -28,6 +32,7 @@ from .execution import (
 from .integrations import Deriv, VenueError
 from .market_data import MarketTicker, deriv_symbol, epoch, fixture_enabled, observe
 from .models import Bot, ExchangeConnection, OrderIntent, Position, RiskConfig, StrategyConfig, StrategyRun
+from .serialization import jsonable
 
 LOG = logging.getLogger("cauche.worker")
 FIXTURE_TICK = 0.08
@@ -109,6 +114,38 @@ def error_state(run_id: str | None, code: str, *, retryable: bool = True) -> Non
         emit(db, bot, "ERROR", code, "The worker could not complete the operation", severity="ERROR")
 
 
+def shadow_decisions(db, bot: Bot, market) -> list[dict]:
+    """Observe alternatives in the same scope without creating executable intents."""
+    candidates = db.scalars(select(StrategyConfig).where(
+        StrategyConfig.id.startswith(f"{bot.exchange}-"),
+        StrategyConfig.id != bot.strategy,
+    ).order_by(StrategyConfig.id))
+    observed = []
+    for candidate in candidates:
+        # Evaluate with the same quote requested by the incumbent. Missing exact
+        # stake/duration remains visible as a rejected shadow decision.
+        try:
+            prediction, expectancy = entry_gate(evaluate(candidate.id, market, candidate.parameters), market)
+        except (TypeError, ValueError):
+            observed.append({
+                "strategy_config_version": candidate.version,
+                "strategy": candidate.id,
+                "side": None,
+                "reason": "SHADOW_CONFIGURATION_INVALID",
+                "orderable_in_research": False,
+            })
+            continue
+        observed.append({
+            "strategy_config_version": candidate.version,
+            "strategy": candidate.id,
+            "side": prediction.side,
+            "reason": prediction.reason,
+            "orderable_in_research": prediction.orderable,
+            "expectancy": expectancy,
+        })
+    return observed
+
+
 _RETAIN_COUNTER = 0
 
 
@@ -164,6 +201,7 @@ async def step(ticker: MarketTicker | None = None) -> float:
         # Source requests happen outside the state transaction. Re-check every
         # setting that can change while the observations are being obtained.
         market = await observe(mode, exchange, instrument, cursor, parameters, strategy=strategy)
+        observation_received_at = utcnow()
         broker_balance = None
         if mode == "BROKER_DEMO":
             verified = await venue.verify_demo()
@@ -195,10 +233,10 @@ async def step(ticker: MarketTicker | None = None) -> float:
             if can_open and bot.mode == "BROKER_DEMO":
                 connection = db.get(ExchangeConnection, exchange)
                 connection.last_sync = utcnow()
+            resolve_market_signals(db, bot, market)
             if bot.mode != "BROKER_DEMO":
-                execute_simulation(db, bot, market, limits, can_open=can_open)
-                db.flush()
                 settle_simulation(db, bot, market)
+                execute_simulation(db, bot, market, limits, can_open=can_open)
             db.flush()
             available = save_balance(db, bot, market, broker_balance=broker_balance)
             bot.cursor += 1
@@ -209,19 +247,36 @@ async def step(ticker: MarketTicker | None = None) -> float:
             if bot.strategy == "KALSHI-STRAT-02":
                 inventory, resting = execution_inventory(db, bot, market)
                 market = replace(market, inventory=inventory, adverse=market.adverse or resting)
-            decision = evaluate(bot.strategy, market, parameters)
-            recorded = record_decision(db, bot, market, decision, version)
-            if recorded and decision.orderable and not (fixture and market.outcome is not None):
+            candidate = evaluate(bot.strategy, market, parameters)
+            calibration = deriv_settlement_calibration(db, bot, market, candidate, version, parameters)
+            decision, expectancy = entry_gate(candidate, market, deriv_calibration=calibration)
+            recorded = record_decision(
+                db, bot, market, decision, version, parameters=parameters, expectancy=expectancy,
+                shadows=shadow_decisions(db, bot, market), observation_received_at=observation_received_at,
+            )
+            if recorded or not fixture:
                 state = check_context(db, bot, market, available)
-                assessment = check_risk(decision, market, limits, state, now=market.timestamp if fixture else epoch())
-                if assessment.allowed:
-                    intent = propose(db, bot, market, recorded, assessment, decision)
-                    if bot.mode == "BROKER_DEMO":
-                        intent.request = {**intent.request, "risk_thresholds": risk.thresholds}
-                        intent.status = "SUBMITTING"
-                        claimed = intent.id
-                else:
-                    risk_violation(db, bot, assessment.code, recorded.id, assessment.as_dict())
+                pause = portfolio_pause(state, limits) if not fixture else None
+                if pause:
+                    details = jsonable({"daily_loss": state.daily_loss, "drawdown": state.drawdown})
+                    if recorded:
+                        recorded.data = {**recorded.data, "risk": {"allowed": False, "code": pause, **details}}
+                    risk_violation(db, bot, pause, recorded.id if recorded else None, details)
+                    update_state(db, bot, blocked=True)
+                elif recorded and decision.orderable and market.outcome is None:
+                    assessment = check_risk(decision, market, limits, state, now=market.timestamp if fixture else epoch())
+                    recorded.data = {**recorded.data, "risk": assessment.as_dict()}
+                    if assessment.allowed:
+                        intent = propose(db, bot, market, recorded, assessment, decision)
+                        if bot.mode == "BROKER_DEMO":
+                            intent.request = {
+                                **intent.request, "risk_thresholds": risk.thresholds,
+                                "claimed_at": jsonable(utcnow()),
+                            }
+                            intent.status = "SUBMITTING"
+                            claimed = intent.id
+                    else:
+                        risk_violation(db, bot, assessment.code, recorded.id, assessment.as_dict())
         if claimed:
             # Claim is durable before the write. Bot row serializes critical
             # controls through the bounded network operation.

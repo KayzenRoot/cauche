@@ -338,3 +338,31 @@ def test_real_account_settings_are_private_and_separate_from_execution(clients, 
     cleared = client.delete(path + "?confirm=true", headers=headers)
     assert cleared.json()["status"] == "NOT_CONFIGURED"
     assert cleared.json()["balance"] is None
+
+
+
+def test_intelligence_routes_require_owner_and_csrf(clients, monkeypatch):
+    client, _database = clients
+    calls = []
+
+    async def inspect(payload):
+        calls.append(payload.ticker)
+        return {"ticker": payload.ticker, "decision_status": "REVIEW_REQUIRED", "extraction": None}
+
+    monkeypatch.setattr(main, "inspect_kalshi", inspect)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    target = "/api/research/kalshi/inspect"
+    for route in ("/api/research/status", "/api/research/evidence"):
+        assert client.get(route).status_code == 401
+
+    csrf = authenticate(client)
+    assert client.get("/api/research/status").json() == {"model": "deepseek-flash", "configured": False}
+    journal = client.get("/api/research/evidence?limit=25")
+    assert journal.status_code == 200
+    assert journal.json()["items"] == []
+    assert client.post(target, json={"ticker": "TEST-26"}, headers={"Origin": APP_ORIGIN}).status_code == 403
+    assert calls == []
+    result = client.post(target, json={"ticker": "test-26"}, headers=csrf)
+    assert result.status_code == 200
+    assert result.json()["decision_status"] == "REVIEW_REQUIRED"
+    assert calls == ["TEST-26"]

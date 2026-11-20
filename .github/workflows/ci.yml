@@ -33,6 +33,7 @@ jobs:
           node-version: '24'
       - run: npm ci
       - run: npm run lint && npm run typecheck && npm run build && npm run build:free
+      - run: node --test tests/research.test.ts
       - run: npm audit --audit-level=moderate
 
   source-and-secrets:

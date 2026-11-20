@@ -67,6 +67,78 @@ function validationRows(test: Backtest) {
   return rows
 }
 
+
+function researchRows(value: unknown): RecordData[] {
+  return Array.isArray(value) ? value.map(recordData) : []
+}
+
+function ResearchEvidence({ result }: { result: Backtest }) {
+  const research = recordData(result.result?.research)
+  const validation = recordData(research.walk_forward)
+  const holdout = recordData(validation.holdout)
+  const windows = researchRows(validation.windows).map((window, index) => ({ ...window, label: 'Janela ' + (index + 1) }))
+  const partitions = Object.keys(holdout).length ? [...windows, { ...holdout, label: 'Teste final reservado' }] : windows
+  const calibratedModels = researchRows(recordData(holdout.calibration).models)
+  const regimes = researchRows(research.regimes)
+  const execution = recordData(result.result?.execution)
+  const names: Record<string, string> = {
+    CURRENT: 'Estratégia atual', REGIME_FILTERED: 'Filtro de regime', MARKET_MIDPOINT: 'Preço médio de mercado',
+    TRAIN_BASE_RATE: 'Taxa de acerto no treino', LOGISTIC_REGRESSION: 'Regressão logística', SHALLOW_TREE: 'Árvore rasa',
+  }
+  if (!Object.keys(research).length && !Object.keys(execution).length) return null
+  return <>
+    {Object.keys(research).length > 0 && <details className="form-body form-details">
+      <summary>Validação cronológica e modelos em sombra</summary>
+      <p className="hint">Evidência do replay. Os resultados em sombra não promovem estratégias automaticamente.</p>
+      <DataTable title="Janelas cronológicas do backtest" empty="Dados cronológicos insuficientes" rows={partitions} columns={[
+        { key: 'label', label: 'Janela', value: row => valueText(row.label) },
+        { key: 'candidate', label: 'Selecionada na validação', value: row => names[String(row.selected_candidate)] ?? valueText(row.selected_candidate) },
+        { key: 'count', label: 'Amostras de teste', numeric: true, value: row => number(scalar(recordData(row.test).observations) as string, 0) },
+        { key: 'trades', label: 'Operações', numeric: true, value: row => number(resultValue(recordData(row.test_metrics), 'trades'), 0) },
+        { key: 'pnl', label: 'Líquido', numeric: true, value: row => money(resultValue(recordData(row.test_metrics), 'net_pnl')) },
+        { key: 'drawdown', label: 'Queda máxima', numeric: true, value: row => percent(resultValue(recordData(row.test_metrics), 'max_drawdown')) },
+      ]} />
+      {Object.keys(holdout).length > 0 && <DataTable title="Estratégias em sombra no teste final" empty="Nenhuma candidata no teste final"
+        rows={Object.entries(recordData(holdout.shadow_candidates)).map(([name, metrics]) => ({ name, metrics }))} columns={[
+          { key: 'name', label: 'Estratégia', value: row => names[String(row.name)] ?? valueText(row.name) },
+          { key: 'trades', label: 'Operações', numeric: true, value: row => number(resultValue(recordData(row.metrics), 'trades'), 0) },
+          { key: 'pnl', label: 'Líquido', numeric: true, value: row => money(resultValue(recordData(row.metrics), 'net_pnl')) },
+          { key: 'drawdown', label: 'Queda máxima', numeric: true, value: row => percent(resultValue(recordData(row.metrics), 'max_drawdown')) },
+        ]} />}
+      {Object.keys(holdout).length > 0 && <DataTable title="Calibração no teste final" empty="Amostras insuficientes para comparar modelos" rows={calibratedModels} columns={[
+        { key: 'model', label: 'Modelo', value: row => names[String(row.model)] ?? valueText(row.model) },
+        { key: 'n', label: 'Desfechos', numeric: true, value: row => number(scalar(recordData(row.evaluation).observations) as string, 0) },
+        { key: 'brier', label: 'Brier score', numeric: true, value: row => number(scalar(recordData(row.evaluation).brier_score) as string, 4) },
+        { key: 'bins', label: 'Calibração', value: row => <details><summary>Ver faixas</summary><ul className="research-citations">
+          {researchRows(recordData(row.evaluation).calibration_bins).map(bin => <li key={String(bin.lower)}>
+            {percent(scalar(bin.lower) as string)}–{percent(scalar(bin.upper) as string)} · Prevista {percent(scalar(bin.mean_probability) as string)} · Observada {percent(scalar(bin.observed_rate) as string)}
+          </li>)}
+        </ul></details> },
+      ]} />}
+      {regimes.length > 0 && <DataTable title="Regimes e sessões do replay" empty="Nenhum regime observado" rows={regimes} columns={[
+        { key: 'regime', label: 'Regime', value: row => valueText(row.regime) },
+        { key: 'session', label: 'Sessão', value: row => valueText(row.session) },
+        { key: 'trades', label: 'Operações', numeric: true, value: row => number(resultValue(row, 'trades'), 0) },
+        { key: 'pnl', label: 'Líquido', numeric: true, value: row => money(resultValue(row, 'net_pnl')) },
+      ]} />}
+    </details>}
+    {Object.keys(execution).length > 0 && <details className="form-body form-details">
+      <summary>Qualidade da execução simulada</summary>
+      <dl className="metrics-detail">
+        <div><dt>Ordens avaliadas</dt><dd>{number(scalar(execution.submitted) as string, 0)}</dd></div>
+        <div><dt>Preenchidas</dt><dd>{number(scalar(execution.filled) as string, 0)}</dd></div>
+        <div><dt>Parciais</dt><dd>{number(scalar(execution.partial) as string, 0)}</dd></div>
+        <div><dt>Latência média (s)</dt><dd>{number(scalar(execution.average_fill_latency_seconds) as string, 1)}</dd></div>
+        <div><dt>Diferença média de preço</dt><dd>{money(scalar(execution.average_price_difference) as string)}</dd></div>
+      </dl>
+      <DataTable title="Desfechos de execução" empty="Nenhuma ordem simulada" rows={Object.entries(recordData(execution.outcomes)).map(([status, count]) => ({ status, count }))}
+        columns={[
+          { key: 'status', label: 'Desfecho', value: row => valueText(row.status) },
+          { key: 'count', label: 'Ocorrências', numeric: true, value: row => number(scalar(row.count) as string, 0) },
+        ]} />
+    </details>}
+  </>
+}
 export function BacktestsPage({ session, strategies }: {session: Session; strategies: Strategy[]}) {
   const client = useQueryClient()
   const [scope, setScope] = useState<Scope>({ exchange: 'DERIV', mode: 'REPLAY', strategy: '', instrument: 'EUR/USD', start: '', end: '' })
@@ -157,6 +229,7 @@ export function BacktestsPage({ session, strategies }: {session: Session; strate
               ...(comparison ? [{ key: 'prior', label: 'Comparativo', value: (row: RecordData) => valueText(row.prior), numeric: true }] : []),
             ]} />
             {chart.length > 0 && <EquityGraph points={chart} />}
+            <ResearchEvidence result={result} />
             {validationRows(result).length > 0 && <details className="form-body form-details">
               <summary>Validação temporal e sensibilidade</summary>
               <DataTable title="Partições e sensibilidade" empty="Sem resultados temporais" rows={validationRows(result)}
