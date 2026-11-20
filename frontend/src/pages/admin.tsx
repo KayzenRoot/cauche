@@ -140,6 +140,7 @@ function ConnectionForm({ environment, exchange, connection, session }: {
       if (kind !== 'test') { setDraft({}); setEnabled(undefined) }
       refresh()
     },
+    onError: () => refresh(),
   })
   const ask = (kind: 'save' | 'remove' | 'test') => setConfirm({
     title: kind === 'remove' ? (isReal ? 'Desconectar a conta real?' : 'Desconectar a demo?')
@@ -186,7 +187,7 @@ function ConnectionForm({ environment, exchange, connection, session }: {
   </form>
 }
 
-function ConnectionsPage({ session }: {session: Session}) {
+export function ConnectionsPage({ session }: {session: Session}) {
   const [environment, setEnvironment] = useState<AccountEnvironment>('BROKER_DEMO')
   const config = accountEnvironments[environment]
   const connections = useQuery({
@@ -198,7 +199,7 @@ function ConnectionsPage({ session }: {session: Session}) {
     <section className="panel setting-banner" aria-label="Configuração por ambiente">
       <div>
         <h2>Ambiente da conta</h2>
-        <p>{environment === 'REAL_READ_ONLY' ? 'Consulte o saldo da conta real com acesso de leitura.' : 'Gerencie as credenciais usadas para operar em demonstração.'}</p>
+        <p>{environment === 'REAL_READ_ONLY' ? 'Consulte o saldo da conta real com acesso de leitura.' : (import.meta.env.MODE === 'cauche-free' ? 'Configure as credenciais e verifique o saldo da conta demo.' : 'Gerencie as credenciais usadas para operar em demonstração.')}</p>
       </div>
       <div className="segmented" role="group" aria-label="Selecionar ambiente">
         {(Object.keys(accountEnvironments) as AccountEnvironment[]).map(option =>

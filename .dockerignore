@@ -17,5 +17,6 @@
 **/.pytest_cache
 **/.ruff_cache
 **/dist
+**/dist-free
 **/test-results
 **/playwright-report

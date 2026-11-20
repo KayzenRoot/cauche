@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
+    "build:free": "tsc -b && vite build --mode cauche-free --outDir dist-free",
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint ."
   },

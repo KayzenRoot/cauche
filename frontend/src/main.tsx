@@ -21,6 +21,7 @@ const BacktestsPage = lazy(() => import('./pages/backtests').then(module => ({ d
 const HistoryPage = lazy(() => import('./pages/records').then(module => ({ default: module.HistoryPage })))
 const LogsPage = lazy(() => import('./pages/records').then(module => ({ default: module.LogsPage })))
 const AdminPages = lazy(() => import('./pages/admin').then(module => ({ default: module.AdminPages })))
+const ConnectionsPage = lazy(() => import('./pages/admin').then(module => ({ default: module.ConnectionsPage })))
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -71,7 +72,7 @@ function Login() {
       </div>
       <div className="login-tagline"><span><Activity size={16} aria-hidden="true" /> Automated Trading Intelligence</span>
         <h2>Estratégia,<br />com controle.</h2>
-        <p>Simule, acompanhe e audite suas decisões em um terminal privado.</p>
+        <p>{import.meta.env.MODE === 'cauche-free' ? 'Configure suas contas e confira a conexão com as corretoras.' : 'Simule, acompanhe e audite suas decisões em um terminal privado.'}</p>
       </div>
     </section>
     <div className="login-access">
@@ -204,6 +205,46 @@ function Workspace({ session }: {session: Session}) {
   </div>
 }
 
+function FreeWorkspace({ session }: {session: Session}) {
+  const client = useQueryClient()
+  const logout = useMutation({
+    mutationFn: () => api<void>('/auth/logout', { method: 'POST', session }),
+    onSuccess: () => {
+      client.setQueryData(['session'], null)
+      client.removeQueries({ predicate: query => query.queryKey[0] !== 'session' })
+    },
+  })
+  return <div className="workspace sidebar-collapsed">
+    <a href="#main-content" className="skip-link">Pular para o conteúdo</a>
+    <aside className="sidebar" aria-label="Menu principal">
+      <div className="sidebar-brand"><Brand compact /></div>
+      <nav aria-label="Navegação principal">
+        <NavLink to="/admin/conexoes" title="Configurações da conta"><Settings2 size={19} aria-hidden="true" /><span>Configurações da conta</span></NavLink>
+      </nav>
+    </aside>
+    <div className="workspace-main">
+      <header className="topbar">
+        <div className="topbar-left"><LockKeyhole size={17} aria-hidden="true" /><span>Terminal privado</span></div>
+        <div className="topbar-right">
+          <button type="button" onClick={() => logout.mutate()} disabled={logout.isPending}><LogOut size={15} aria-hidden="true" /> Sair</button>
+        </div>
+      </header>
+      <main id="main-content" tabIndex={-1} className="content">
+        <div className="page-stack">
+          {logout.isError && <Problem error={logout.error} />}
+          <section className="panel setting-banner">
+            <div><h2>Configurações da conta</h2><p>Esta versão permite testar conexões e consultar saldos. O motor de negociação está indisponível.</p></div>
+          </section>
+          <Suspense fallback={<Loading />}><Routes>
+            <Route path="/admin/conexoes" element={<ConnectionsPage session={session} />} />
+            <Route path="*" element={<Navigate to="/admin/conexoes" replace />} />
+          </Routes></Suspense>
+        </div>
+      </main>
+    </div>
+  </div>
+}
+
 function App() {
   const client = useQueryClient()
   const session = useQuery({
@@ -223,7 +264,9 @@ function App() {
   if (session.isPending) return <main className="app-pending"><Brand /><Loading /></main>
   if (session.isError) return <main className="app-pending"><Brand /><Problem error={session.error} retry={() => void session.refetch()} /></main>
   if (!session.data) return <Login />
-  return <Workspace key={session.data.email} session={session.data} />
+  return import.meta.env.MODE === 'cauche-free'
+    ? <FreeWorkspace key={session.data.email} session={session.data} />
+    : <Workspace key={session.data.email} session={session.data} />
 }
 
 createRoot(document.getElementById('root')!).render(
