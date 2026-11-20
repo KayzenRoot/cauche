@@ -28,7 +28,7 @@ export function credentialsFor(exchange, environment, value) {
 async function readBalance(url, headers, fetcher) {
   const response = await fetcher(url, {
     method: "GET", headers: { ...headers, Accept: "application/json" },
-    redirect: "error", signal: AbortSignal.timeout(8000),
+    redirect: "manual", signal: AbortSignal.timeout(8000),
   });
   if (!response.ok) throw new Error("VENUE_REJECTED");
   return response.json();

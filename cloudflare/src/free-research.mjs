@@ -88,7 +88,7 @@ async function marketRules(ticker, fetcher) {
   try {
     const response = await fetcher(KALSHI + ticker, {
       method: "GET", headers: { Accept: "application/json" },
-      redirect: "error", signal: AbortSignal.timeout(7000),
+      redirect: "manual", signal: AbortSignal.timeout(7000),
     });
     if (response.status === 404) throw new ResearchError(404, "KALSHI_MARKET_NOT_FOUND");
     if (!response.ok) throw new Error("invalid market response");
@@ -144,7 +144,7 @@ async function extract(key, ticker, rules, sources, fetcher) {
     const response = await fetcher(DEEPSEEK, {
       method: "POST",
       headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
-      redirect: "error", signal: AbortSignal.timeout(23000),
+      redirect: "manual", signal: AbortSignal.timeout(23000),
       body: JSON.stringify({
         model: RESEARCH_MODEL,
         thinking: { type: "disabled" },

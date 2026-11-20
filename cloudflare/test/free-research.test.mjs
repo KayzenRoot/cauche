@@ -33,7 +33,7 @@ test("uses the exact Flash model and emits only cited evidence with human review
     calls.push(url);
     if (url === marketUrl) return Response.json(market);
     assert.equal(url, "https://api.deepseek.com/chat/completions");
-    assert.equal(init.redirect, "error");
+    assert.equal(init.redirect, "manual");
     const input = JSON.parse(init.body);
     assert.equal(input.model, RESEARCH_MODEL);
     assert.deepEqual(input.response_format, { type: "json_object" });

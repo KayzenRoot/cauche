@@ -81,7 +81,7 @@ test("keeps Deriv demo and real selectors isolated on the fixed GET route", asyn
   const fetcher = async (url, request) => {
     assert.equal(url, "https://api.derivws.com/trading/v1/options/accounts");
     assert.equal(request.method, "GET");
-    assert.equal(request.redirect, "error");
+    assert.equal(request.redirect, "manual");
     return Response.json({ data: [
       { account_type: "demo", status: "active", account_id: "demo-fixture", currency: "USD", balance: "12.40" },
       { account_type: "real", status: "active", account_id: "real-fixture", currency: "USD", balance: "0.30" },
@@ -107,7 +107,7 @@ test("uses the matching Kalshi host and signs only the canonical balance GET", a
         const path = "/trade-api/v2/portfolio/balance";
         assert.equal(url, "https://" + host + path);
         assert.equal(request.method, "GET");
-        assert.equal(request.redirect, "error");
+        assert.equal(request.redirect, "manual");
         const timestamp = request.headers["KALSHI-ACCESS-TIMESTAMP"];
         const signature = Buffer.from(request.headers["KALSHI-ACCESS-SIGNATURE"], "base64");
         const message = Buffer.from(timestamp + "GET" + path);

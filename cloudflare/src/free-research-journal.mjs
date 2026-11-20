@@ -30,7 +30,7 @@ export async function captureBook(ticker, fetcher = fetch) {
   try {
     const response = await fetcher(url, {
       method: "GET", headers: { Accept: "application/json" },
-      redirect: "error", signal: AbortSignal.timeout(7000),
+      redirect: "manual", signal: AbortSignal.timeout(7000),
     });
     if (!response.ok || Number(response.headers.get("Content-Length") ?? 0) > 4096) {
       throw new Error("Book unavailable");
