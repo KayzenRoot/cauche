@@ -107,10 +107,26 @@ def array(value: Any) -> list:
     return value
 
 
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_constant(_value: str) -> Any:
+    raise ValueError("Non-finite JSON constant")
+
+
 def parse_json(raw: str | bytes) -> dict[str, Any]:
     try:
-        return object_(json.loads(raw, parse_float=Decimal))
-    except (ValueError, UnicodeError, RecursionError):
+        return object_(json.loads(
+            raw, parse_float=Decimal, object_pairs_hook=_unique_object,
+            parse_constant=_reject_constant,
+        ))
+    except (ValueError, TypeError, DecimalException, UnicodeError, RecursionError):
         raise VenueError("INVALID_RESPONSE") from None
 
 
