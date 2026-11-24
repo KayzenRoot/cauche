@@ -18,3 +18,7 @@ test-results/
 .DS_Store
 coverage.json
 *.tsbuildinfo
+/.wrangler/
+/frontend/dist-free/
+/cloudflare/.wrangler/
+/cloudflare/.dev.vars*

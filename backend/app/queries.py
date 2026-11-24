@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from .db import aware, utcnow
 from .models import (
     BalanceSnapshot, Bot, ExchangeConnection, Fee, Fill, MarketCandle, MarketSnapshot,
-    Order, Position, Settlement, Signal,
+    Order, OrderIntent, Position, Settlement, Signal,
 )
 from .schemas import Exchange, Instrument, Mode, StrategyId, boundary
 from .serialization import jsonable, record
@@ -131,6 +131,93 @@ def history(session: Session, scope: Filters, limit: int, offset: int = 0) -> di
         for model in tables
     }
     return {**payload, "offset": offset, "limit": limit}
+
+
+def _execution_evidence(intent, order, fills) -> dict:
+    expected = intent.request.get("decision") or {}
+    quantity = Decimal(expected.get("quantity", "0"))
+    expected_price = Decimal(expected["price"]) if expected.get("price") is not None else None
+    fill_count, filled, fill_value, fees, first_fill, last_fill = fills or (
+        0, Decimal(0), Decimal(0), Decimal(0), None, None,
+    )
+    average = fill_value / filled if filled else None
+    latency = (aware(first_fill) - aware(intent.timestamp)).total_seconds() if first_fill else None
+    return {
+        "status": order.status if order else intent.status,
+        "source": order.source if order else intent.request.get("source"),
+        "expected_price": expected_price,
+        "expected_quantity": quantity,
+        "expected_payout": expected.get("payout"),
+        "expected_costs": expected.get("estimated_costs"),
+        "fees_paid": fees,
+        "broker_quoted_payout": order.data.get("broker_quoted_payout") if order else None,
+        "filled_quantity": filled,
+        "unfilled_quantity": max(Decimal(0), quantity - filled),
+        "remaining_quantity": order.remaining_quantity if order else None,
+        "partial_fill": Decimal(0) < filled < quantity,
+        "average_fill_price": average,
+        "slippage_per_unit": average - expected_price if average is not None and expected_price is not None else None,
+        "fill_count": fill_count,
+        "first_fill_at": first_fill,
+        "last_fill_at": last_fill,
+        "first_fill_latency_ms": round(latency * 1000) if latency is not None and latency >= 0 else None,
+        "latency_basis": (
+            ("BROKER_TIMESTAMP" if intent.mode == "BROKER_DEMO" else "SIMULATED_MARKET_CLOCK")
+            if first_fill else None
+        ),
+        "rejection_code": intent.response.get("code"),
+    }
+
+
+def research_evidence(session: Session, scope: Filters, limit: int, offset: int = 0) -> dict:
+    """Paginate decisions, including NO_SIGNAL, with attributable fills and settlement."""
+    statement = scoped(select(Signal), Signal, scope)
+    total = session.scalar(select(func.count()).select_from(statement.with_only_columns(Signal.id).subquery()))
+    shadow_state = Signal.data["deriv_shadow"]["status"].as_string()
+    shadow_counts = dict(session.execute(scoped(
+        select(shadow_state, func.count()).where(
+            Signal.exchange == "DERIV", shadow_state.in_(("PENDING", "OBSERVED", "UNAVAILABLE")),
+        ).group_by(shadow_state),
+        Signal, scope,
+    )).all())
+    coverage = {status.lower(): shadow_counts.get(status, 0) for status in ("PENDING", "OBSERVED", "UNAVAILABLE")}
+    envelope = {"total": total, "offset": offset, "limit": limit, "deriv_shadow_coverage": coverage}
+    page = list(session.scalars(statement.order_by(Signal.timestamp.desc(), Signal.id.desc()).limit(limit).offset(offset)))
+    if not page:
+        return {"items": [], **envelope}
+    linked = session.execute(
+        select(OrderIntent, Order, Settlement)
+        .outerjoin(Order, Order.intent_id == OrderIntent.id)
+        .outerjoin(Settlement, Settlement.order_id == Order.id)
+        .where(OrderIntent.signal_id.in_([signal.id for signal in page]))
+        .order_by(OrderIntent.timestamp, OrderIntent.id)
+    ).all()
+    by_signal = {intent.signal_id: (intent, order, settlement) for intent, order, settlement in linked}
+    order_ids = [order.id for _, order, _ in linked if order]
+    fills_by_order = {}
+    if order_ids:
+        totals = session.execute(
+            select(
+                Fill.order_id, func.count(), func.sum(Fill.quantity),
+                func.sum(Fill.quantity * Fill.price), func.sum(Fill.fee),
+                func.min(Fill.timestamp), func.max(Fill.timestamp),
+            )
+            .where(Fill.order_id.in_(order_ids))
+            .group_by(Fill.order_id)
+        )
+        fills_by_order = {key: tuple(values) for key, *values in totals}
+    items = []
+    for signal in page:
+        intent, order, settlement = by_signal.get(signal.id, (None, None, None))
+        items.append({
+            **record(signal),
+            "intent": record(intent, exclude=("request",)) if intent else None,
+            "execution": (
+                _execution_evidence(intent, order, fills_by_order.get(order.id) if order else None) if intent else None
+            ),
+            "settlement": record(settlement) if settlement else None,
+        })
+    return jsonable({"items": items, **envelope})
 
 
 def _amounts(session, scope):

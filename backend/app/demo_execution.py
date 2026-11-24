@@ -12,6 +12,7 @@ from .integrations import Deriv, Kalshi, VenueError
 from .market_data import deriv_symbol
 from .models import Bot, ExchangeConnection, Order, OrderIntent, Position, RiskConfig, StrategyConfig
 from .security import decrypt_credentials
+from .serialization import jsonable
 
 ZERO = Decimal("0")
 BROKER_SOURCE = "OFFICIAL_DEMO"
@@ -60,18 +61,28 @@ def acknowledge(db: Session, intent: OrderIntent, result: dict) -> Order:
         raise ValueError("INVALID_BROKER_CONFIRMATION")
     if intent.exchange == "DERIV" and result.get("currency") != "USD":
         raise ValueError("UNSUPPORTED_CURRENCY")
+    observed_at = result.get("observed_at")
+    if intent.exchange == "DERIV" and (type(observed_at) is not int or observed_at <= 0):
+        raise ValueError("INVALID_BROKER_CONFIRMATION_TIME")
     order = new_order(
         db, intent, decision, status=state, source=BROKER_SOURCE, broker_id=broker_id,
-        price=price, remaining=remaining, meta={"reported_filled": str(result.get("filled_quantity", ZERO))},
+        price=price, remaining=remaining, meta=jsonable({
+            "reported_filled": amount(result.get("filled_quantity")),
+            "broker_observed_at": observed_at,
+            "broker_quoted_payout": result.get("payout"),
+        }),
     )
     intent.status = "CONFIRMED"
-    intent.response = {"broker_id": broker_id, "status": state, "source": BROKER_SOURCE}
+    intent.response = {
+        **intent.response, "broker_id": broker_id, "status": state, "source": BROKER_SOURCE,
+        "acknowledged_at": jsonable(utcnow()), "broker_observed_at": observed_at,
+    }
     emit(db, intent, "ORDER", "ORDER_ACKNOWLEDGED", "Broker acknowledged order", order_id=order.id,
          context=intent.response)
     if intent.exchange == "DERIV":
         record_fill(
             db, order, key=broker_id, broker_id=broker_id, quantity=Decimal("1"),
-            price=price, fee=amount(result.get("fee")), timestamp=utcnow(),
+            price=price, fee=amount(result.get("fee")), timestamp=moment(observed_at),
         )
     return order
 
@@ -83,6 +94,7 @@ async def dispatch(db: Session, bot: Bot, intent: OrderIntent) -> None:
     if (
         bot.mode != "BROKER_DEMO" or bot.desired_state != "RUNNING"
         or intent.risk.get("allowed") is not True
+        or amount((intent.request.get("expectancy") or {}).get("conservative_net_ev")) <= ZERO
         or not risk or risk.kill_switch or risk.thresholds != intent.request.get("risk_thresholds")
         or not config or not config.enabled
         or not connection or connection.status != "CONNECTED"
@@ -93,12 +105,16 @@ async def dispatch(db: Session, bot: Bot, intent: OrderIntent) -> None:
         return
     venue = client(connection)
     decision = Decision.from_dict(intent.request["decision"])
+    intent.response = {"submitted_at": jsonable(utcnow()), "source": BROKER_SOURCE}
     try:
         if isinstance(venue, Deriv):
             result = await venue.submit_demo(
                 deriv_symbol(bot.instrument), decision.side, decision.price,
                 duration=decision.duration_seconds // 60, client_order_id=intent.id,
-                min_payout_ratio=Decimal(str(risk.thresholds.get("min_payout_ratio", "1.40"))),
+                min_payout_ratio=max(
+                    amount(risk.thresholds.get("min_payout_ratio"), "1.40"),
+                    decision.payout / decision.exposure,
+                ),
             )
         else:
             result = await venue.submit_demo(
@@ -107,7 +123,10 @@ async def dispatch(db: Session, bot: Bot, intent: OrderIntent) -> None:
             )
     except VenueError as error:
         intent.status = "UNKNOWN" if error.outcome_unknown else "REJECTED"
-        intent.response = {"code": error.code, "outcome_unknown": error.outcome_unknown}
+        intent.response = {
+            **intent.response, "code": error.code,
+            "outcome_unknown": error.outcome_unknown, "failed_at": jsonable(utcnow()),
+        }
         emit(db, intent, "ERROR", error.code, "Demo submission was not confirmed",
              severity="ERROR", order_id=intent.id, context=intent.response)
         if error.outcome_unknown:

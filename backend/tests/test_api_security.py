@@ -18,7 +18,7 @@ from app.config import APP_ORIGIN, COOKIE_NAME
 from app.db import Base, utcnow
 from app.events import event
 from app.models import (
-    AuditEvent, BalanceSnapshot, Bot, ExchangeConnection, RiskConfig,
+    AuditEvent, BalanceSnapshot, Bot, ExchangeConnection, RealAccountConnection, RiskConfig,
     STRATEGIES, StrategyConfig, StrategyRun, SystemEvent, User,
 )
 from app.models import Session as StoredSession
@@ -45,6 +45,7 @@ def clients(monkeypatch):
     with local.begin() as db:
         db.add_all([Bot(), RiskConfig()])
         db.add_all(ExchangeConnection(exchange=venue) for venue in ("DERIV", "KALSHI"))
+        db.add_all(RealAccountConnection(exchange=venue) for venue in ("DERIV", "KALSHI"))
         db.add_all(StrategyConfig(id=key) for key in STRATEGIES)
     assert bootstrap.bootstrap(TEST_EMAIL, TEST_PASSWORD)
     assert not bootstrap.bootstrap(TEST_EMAIL, TEST_PASSWORD)
@@ -292,3 +293,76 @@ def test_demo_verification_needs_demo_provenance(clients, monkeypatch):
     assert verified.status_code == 200 and verified.json()["status"] == "CONNECTED"
     assert verified.json()["capabilities"]["demo_balance"] == "123.45"
     assert "fixture-credential" not in verified.text
+
+
+def test_real_account_settings_are_private_and_separate_from_execution(clients, monkeypatch):
+    from app.integrations.real_accounts import DerivRealReader
+
+    client, local = clients
+    path = "/api/admin/real-connections/DERIV"
+    assert client.get("/api/admin/real-connections").status_code == 401
+    headers = authenticate(client)
+    monkeypatch.setenv("CAUCHE_MASTER_KEY", Fernet.generate_key().decode())
+    initial = client.get("/api/admin/real-connections").json()["items"]
+    assert len(initial) == 2 and all(item["balance"] is None for item in initial)
+
+    payload = {"confirm": True, "credentials": {"app_id": "test-app", "token": "example-token"}}
+    assert client.put(path, headers=headers, json=payload).status_code == 422
+    payload["credentials"]["account_id"] = "DOT90004580"
+    assert client.put(path, headers={"Origin": APP_ORIGIN}, json=payload).status_code == 403
+    stored = client.put(path, headers=headers, json=payload)
+    assert stored.status_code == 200 and stored.json()["status"] == "UNVERIFIED"
+    assert "example-token" not in stored.text and "DOT90004580" not in stored.text
+    with local() as db:
+        real = db.get(RealAccountConnection, "DERIV")
+        assert real.ciphertext and "example-token" not in real.ciphertext
+        assert db.get(ExchangeConnection, "DERIV").ciphertext is None
+
+    async def verify(reader):
+        assert reader._account_id == "DOT90004580"
+        return "USD", Decimal("105.25")
+
+    monkeypatch.setattr(DerivRealReader, "verify", verify)
+    checked = client.post(path + "/test", headers=headers, json={"confirm": True})
+    assert checked.status_code == 200
+    result = checked.json()
+    assert result["environment"] == "REAL_READ_ONLY" and result["status"] == "CONNECTED"
+    assert result["capabilities"]["currency"] == "USD" and Decimal(result["balance"]) == Decimal("105.25")
+    assert result["last_sync"]
+
+    denied = client.post("/api/bot/start", headers=headers, json={
+        "mode": "REAL_READ_ONLY", "exchange": "DERIV", "strategy": "DERIV-STRAT-01", "instrument": "frxEURUSD",
+    })
+    assert denied.status_code == 422
+
+    cleared = client.delete(path + "?confirm=true", headers=headers)
+    assert cleared.json()["status"] == "NOT_CONFIGURED"
+    assert cleared.json()["balance"] is None
+
+
+
+def test_intelligence_routes_require_owner_and_csrf(clients, monkeypatch):
+    client, _database = clients
+    calls = []
+
+    async def inspect(payload):
+        calls.append(payload.ticker)
+        return {"ticker": payload.ticker, "decision_status": "REVIEW_REQUIRED", "extraction": None}
+
+    monkeypatch.setattr(main, "inspect_kalshi", inspect)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    target = "/api/research/kalshi/inspect"
+    for route in ("/api/research/status", "/api/research/evidence"):
+        assert client.get(route).status_code == 401
+
+    csrf = authenticate(client)
+    assert client.get("/api/research/status").json() == {"model": "deepseek-flash", "configured": False}
+    journal = client.get("/api/research/evidence?limit=25")
+    assert journal.status_code == 200
+    assert journal.json()["items"] == []
+    assert client.post(target, json={"ticker": "TEST-26"}, headers={"Origin": APP_ORIGIN}).status_code == 403
+    assert calls == []
+    result = client.post(target, json={"ticker": "test-26"}, headers=csrf)
+    assert result.status_code == 200
+    assert result.json()["decision_status"] == "REVIEW_REQUIRED"
+    assert calls == ["TEST-26"]
