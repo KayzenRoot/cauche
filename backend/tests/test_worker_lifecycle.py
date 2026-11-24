@@ -2,7 +2,9 @@
 
 import asyncio
 import logging
+import runpy
 import signal
+import sys
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -107,4 +109,24 @@ def test_main_calls_async_worker(monkeypatch):
     monkeypatch.setattr(worker.logging, "basicConfig", configure)
     worker.main()
     execute.assert_awaited_once_with()
+    configure.assert_called_once()
+
+
+def test_module_entrypoint_delegates_to_worker_loop(monkeypatch):
+    # Execute the actual python -m entrypoint while intercepting only the
+    # infinite event-loop boundary: no daemon, database or remote I/O.
+    def run(coroutine):
+        try:
+            assert coroutine.cr_code.co_name == "loop"
+            assert coroutine.cr_frame.f_globals["__name__"] == "__main__"
+        finally:
+            coroutine.close()
+
+    execute = Mock(side_effect=run)
+    configure = Mock()
+    monkeypatch.setattr(asyncio, "run", execute)
+    monkeypatch.setattr(worker.logging, "basicConfig", configure)
+    monkeypatch.delitem(sys.modules, "app.worker")
+    runpy.run_module("app.worker", run_name="__main__", alter_sys=True)
+    execute.assert_called_once()
     configure.assert_called_once()

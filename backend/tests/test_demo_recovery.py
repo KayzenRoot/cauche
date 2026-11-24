@@ -14,7 +14,7 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 
 from app import demo_execution, worker
 from app.db import Base, utcnow
-from app.domain import Book, Decision, Market
+from app.domain import Book, Candle, Decision, Market
 from app.integrations import Deriv, Kalshi, VenueError
 from app.models import (
     BalanceSnapshot, Bot, ExchangeConnection, Fee, Fill, MarketSnapshot, Order, OrderIntent, Position,
@@ -1293,3 +1293,89 @@ async def test_worker_balance_discrepancy_prevents_new_claim(recovery_db, venue,
         assert db.scalar(select(RiskViolation)).code == "BALANCE_DISCREPANCY"
         assert db.scalar(select(func.count()).select_from(OrderIntent)) == 0
         assert db.scalar(select(func.count()).select_from(BalanceSnapshot)) == 1
+
+
+# CD-14: remaining worker paths and release of orphaned read-only subscriptions.
+@pytest.mark.parametrize("kind", ["absent", "disappears", "no-run"])
+async def test_worker_idle_context_stops_ticker(recovery_db, venue, monkeypatch, kind):
+    if kind in {"absent", "no-run"}:
+        with recovery_db.begin() as db:
+            bot = db.get(Bot, 1)
+            if kind == "absent":
+                db.delete(bot)
+            else:
+                bot.run_id = None
+                bot.state = bot.desired_state = "STOPPED"
+    else:
+        # Remove the actual row after the safety-barrier transaction has
+        # committed, before the next transaction acquires the bot row lock.
+        lock = worker.locked_bot
+        calls = 0
+
+        def disappearing_bot(db):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                with recovery_db.begin() as other:
+                    other.delete(other.get(Bot, 1))
+            return lock(db)
+
+        monkeypatch.setattr(worker, "locked_bot", disappearing_bot)
+
+    ticker = Mock()
+    ticker.select = AsyncMock()
+    assert await worker.step(ticker) == (1.0 if kind == "no-run" else worker.MARKET_TICK)
+    ticker.select.assert_awaited_once_with(None)
+    worker.observe.assert_not_awaited()
+    venue.reconcile_demo.assert_not_awaited()
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        bot = db.get(Bot, 1)
+        if kind == "no-run":
+            assert bot.run_id is None and bot.state == "STOPPED" and bot.heartbeat_at is not None
+        else:
+            assert bot is None
+        assert db.scalar(select(func.count()).select_from(OrderIntent)) == 0
+        assert db.scalar(select(func.count()).select_from(MarketSnapshot)) == 0
+
+
+async def test_worker_deriv_public_stream_uses_native_symbol_without_credentials(recovery_db, venue, monkeypatch):
+    strategy = "DERIV-STRAT-01"
+    with recovery_db.begin() as db:
+        bot = db.get(Bot, 1)
+        run = db.get(StrategyRun, bot.run_id)
+        bot.mode = run.mode = "PAPER"
+        bot.exchange = run.exchange = "DERIV"
+        bot.instrument = run.instrument = "EUR/USD"
+        bot.strategy = run.strategy = strategy
+        db.add(StrategyConfig(id=strategy))
+
+    public_adapter = Mock(spec=Deriv)
+    factory = Mock(return_value=public_adapter)
+    monkeypatch.setattr(worker, "Deriv", factory)
+    client = Mock(side_effect=AssertionError("paper mode must not use authenticated adapter"))
+    monkeypatch.setattr(worker, "client", client)
+    timestamp = worker.epoch()
+    market = Market(
+        "DERIV", "EUR/USD", "frxEURUSD", timestamp, "DERIV_OFFICIAL_PUBLIC",
+        candles=(Candle(timestamp, Decimal("1.10"), Decimal("1.11"), Decimal("1.09"), Decimal("1.10")),),
+    )
+    monkeypatch.setattr(worker, "observe", AsyncMock(return_value=market))
+    monkeypatch.setattr(worker, "evaluate", Mock(return_value=Decision(strategy=strategy, version="1", reason="TEST")))
+    ticker = Mock()
+    ticker.select = AsyncMock()
+    ticker.latest.return_value = None
+    assert await worker.step(ticker) == worker.MARKET_TICK
+    factory.assert_called_once_with()
+    client.assert_not_called()
+    ticker.select.assert_awaited_once_with("run-current", public_adapter, "frxEURUSD")
+    ticker.latest.assert_called_once_with("run-current")
+    venue.submit_demo.assert_not_awaited()
+    assert not public_adapter.mock_calls
+    with recovery_db() as db:
+        bot = db.get(Bot, 1)
+        assert bot.cursor == 1 and bot.state == "RUNNING"
+        snapshot = db.scalar(select(MarketSnapshot))
+        assert snapshot.instrument == "EUR/USD" and snapshot.source == "DERIV_OFFICIAL_PUBLIC"
+        assert db.scalar(select(func.count()).select_from(Signal)) == 1
+        assert db.scalar(select(func.count()).select_from(OrderIntent)) == 0

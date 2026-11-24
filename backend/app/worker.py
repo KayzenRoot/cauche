@@ -170,6 +170,8 @@ async def step(ticker: MarketTicker | None = None) -> float:
         with SessionLocal.begin() as db:
             bot = locked_bot(db)
             if bot is None:
+                if ticker is not None:
+                    await ticker.select(None)
                 return MARKET_TICK
             run_id = bot.run_id
             persist_recovery_barrier(db, bot)
@@ -177,6 +179,8 @@ async def step(ticker: MarketTicker | None = None) -> float:
         with SessionLocal.begin() as db:
             bot = locked_bot(db)
             if bot is None:
+                if ticker is not None:
+                    await ticker.select(None)
                 return MARKET_TICK
             bot.heartbeat_at = utcnow()
             if _RETAIN_COUNTER == 0:
@@ -184,6 +188,8 @@ async def step(ticker: MarketTicker | None = None) -> float:
             _RETAIN_COUNTER = (_RETAIN_COUNTER + 1) % 720
             run_id = bot.run_id
             if not run_id:
+                if ticker is not None:
+                    await ticker.select(None)
                 return 1.0
             run, config, risk = worker_context(db, bot)
             observed_scope = execution_scope(bot)
