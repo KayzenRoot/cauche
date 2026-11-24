@@ -175,21 +175,26 @@ class Kalshi:
     async def markets(
         self, *, category: str | None = None, limit: int = 100
     ) -> list[dict]:
-        if not 1 <= limit <= 500:
+        if type(limit) is not int or not 1 <= limit <= 500:
             raise VenueError("INVALID_LIMIT")
         rows = []
+        seen = set()
         params = {"status": "open", "limit": limit, "mve_filter": "exclude"}
         if category is None:
             async for market in self._pages("/markets", "markets", params):
                 if market.get("market_type") == "binary":
-                    rows.append(_market(market, self.source))
+                    rows.append(_unique_market(market, self.source, seen))
                     if len(rows) >= limit:
                         break
             return rows
         identifier(category, r"[A-Za-z0-9 &_-]{1,100}")
         reply = await self._read("/series", params={"category": category})
+        series_seen = set()
         for series in map(object_, array(reply.get("series"))):
             ticker = identifier(string(series.get("ticker")), _TICKER)
+            if ticker in series_seen:
+                raise VenueError("INVALID_RESPONSE")
+            series_seen.add(ticker)
             async for market in self._pages(
                 "/markets",
                 "markets",
@@ -198,7 +203,7 @@ class Kalshi:
                 if market.get("market_type") == "binary":
                     rows.append(
                         {
-                            **_market(market, self.source),
+                            **_unique_market(market, self.source, seen),
                             "category": series.get("category"),
                             "series_ticker": ticker,
                         }
@@ -237,17 +242,21 @@ class Kalshi:
         }
 
     async def related_markets(self, instrument: str, *, limit: int = 100) -> list[dict]:
-        if not 1 <= limit <= 500:
+        if type(limit) is not int or not 1 <= limit <= 500:
             raise VenueError("INVALID_LIMIT")
         source = await self.market(instrument, include_fees=False)
         rows = []
+        seen = set()
         async for market in self._pages(
             "/markets",
             "markets",
             {"event_ticker": source["event_ticker"], "limit": limit},
         ):
             if market.get("market_type") == "binary":
-                rows.append(_market(market, self.source))
+                normalized = _unique_market(market, self.source, seen)
+                if normalized["event_ticker"] != source["event_ticker"]:
+                    raise VenueError("INVALID_RESPONSE")
+                rows.append(normalized)
                 if len(rows) >= limit:
                     break
         return rows
@@ -291,7 +300,10 @@ class Kalshi:
         self, instrument: str, interval_seconds: int = 300, limit: int = 200
     ) -> list[dict]:
         ticker = identifier(instrument, _TICKER)
-        if interval_seconds not in {60, 300, 3600, 86400} or not 1 <= limit <= 1000:
+        if (
+            type(interval_seconds) is not int or type(limit) is not int
+            or interval_seconds not in {60, 300, 3600, 86400} or not 1 <= limit <= 1000
+        ):
             raise VenueError("INVALID_HISTORY_RANGE")
         end = int(time.time()) // interval_seconds * interval_seconds
         start = end - interval_seconds * limit
@@ -311,16 +323,22 @@ class Kalshi:
         if len(records) != 1 or records[0].get("market_ticker") != ticker:
             raise VenueError("INVALID_RESPONSE")
         result = []
+        seen = set()
         for raw in map(object_, array(records[0].get("candlesticks"))):
             closed = number(raw.get("end_period_ts"))
             if not start < closed <= end:
                 continue
+            if closed % native_interval or closed in seen:
+                raise VenueError("INVALID_RESPONSE")
+            seen.add(closed)
             stats = object_(raw.get("price"))
             if any(
                 stats.get(item + "_dollars") is None
                 for item in ("open", "high", "low", "close")
             ):
                 continue
+            for item in ("open", "high", "low", "close"):
+                _price(stats[item + "_dollars"])
             result.append(
                 bar(
                     closed - native_interval,
@@ -330,8 +348,6 @@ class Kalshi:
                 )
             )
         result.sort(key=lambda row: row["time"])
-        if any(a["time"] == b["time"] for a, b in zip(result, result[1:])):
-            raise VenueError("INVALID_RESPONSE")
         if interval_seconds != native_interval:
             result = _aggregate_bars(result, interval_seconds)
         return result[-limit:]
@@ -340,19 +356,21 @@ class Kalshi:
         self, instrument: str, *, depth: int = 20, market: dict | None = None
     ) -> dict:
         ticker = identifier(instrument, _TICKER)
-        if not 1 <= depth <= 100:
+        if type(depth) is not int or not 1 <= depth <= 100:
             raise VenueError("INVALID_DEPTH")
         if market is None:
             market = await self.market(ticker, include_fees=False)
-        if market.get("instrument") != ticker:
+        if (not isinstance(market, dict) or market.get("instrument") != ticker
+                or market.get("source") != self.source):
             raise VenueError("INVALID_RESPONSE")
+        event = identifier(string(market.get("event_ticker")), _TICKER)
         observed = int(time.time())
         raw = await self._read(f"/markets/{ticker}/orderbook", params={"depth": depth})
         book = object_(raw.get("orderbook_fp"))
         return {
             **_book(_levels(book.get("yes_dollars")), _levels(book.get("no_dollars"))),
             "instrument": ticker,
-            "event": market["event_ticker"],
+            "event": event,
             "observed_at": observed,
             "source": self.source,
         }
@@ -705,6 +723,15 @@ def _aggregate_bars(rows: list[dict], interval: int) -> list[dict]:
             previous["close"] = row["close"]
             previous["volume"] += row["volume"]
     return list(grouped.values())
+
+
+def _unique_market(raw: dict, source: str, seen: set[str]) -> dict:
+    normalized = _market(raw, source)
+    ticker = normalized["instrument"]
+    if ticker in seen:
+        raise VenueError("INVALID_RESPONSE")
+    seen.add(ticker)
+    return normalized
 
 
 def _market(raw: dict, source: str) -> dict:
