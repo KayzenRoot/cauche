@@ -15,7 +15,7 @@ from app.db import Base, utcnow
 from app.domain import Decision
 from app.integrations import Kalshi, VenueError
 from app.models import (
-    Bot, ExchangeConnection, Fill, Order, OrderIntent, RiskConfig, Signal,
+    Bot, ExchangeConnection, Fee, Fill, Order, OrderIntent, Position, RiskConfig, Settlement, Signal,
     StrategyConfig, StrategyRun, SystemEvent,
 )
 
@@ -196,3 +196,60 @@ async def test_already_confirmed_claim_is_not_recovered_again(recovery_db, venue
         )
     venue.find_demo_order.assert_not_awaited()
     venue.submit_demo.assert_not_awaited()
+
+
+# CD-05: real ledger writes/rollback on both existing test databases.
+@pytest.mark.parametrize("invalid", [False, True])
+async def test_deriv_settlement_ledger_exact_and_idempotent(recovery_db, invalid):
+    now = utcnow()
+    decision = Decision(
+        strategy="DERIV-STRAT-01", version="1", reason="TEST", side="CALL",
+        price=Decimal("1"), quantity=Decimal("1"), exposure=Decimal("1"),
+        orderable=True, instrument="EUR/USD",
+    )
+    fields = dict(mode="BROKER_DEMO", exchange="DERIV", strategy="DERIV-STRAT-01",
+                  instrument="EUR/USD", run_id="run-deriv", timestamp=now)
+    with recovery_db.begin() as db:
+        db.add(Signal(id="deriv-signal", direction="CALL", reason="TEST", **fields))
+        db.flush()
+        intent = OrderIntent(id="deriv-claim", signal_id="deriv-signal", status="SUBMITTING",
+                             request={"decision": decision.as_dict()}, **fields)
+        db.add(intent)
+        db.flush()
+        demo_execution.acknowledge(db, intent, {
+            "source": "DERIV_DEMO", "client_order_id": intent.id, "broker_id": "123",
+            "status": "OPEN", "currency": "USD", "price": Decimal("1"),
+            "quantity": Decimal("1"), "fee": Decimal("0.10"),
+        })
+    when = int(now.timestamp()) + 300
+    result = dict(broker_id="123", source="DERIV_DEMO", currency="USD", status="SETTLED",
+                  price=Decimal("1"), payout=Decimal("1.80"),
+                  profit=Decimal("0.80" if invalid else "0.70"), fee=Decimal("0.10"),
+                  settled_at=when, observed_at=when + 1)
+    venue = Mock()
+    venue.reconcile_demo = AsyncMock(return_value=result)
+    if invalid:
+        with pytest.raises(ValueError, match="INVALID_BROKER_SETTLEMENT"):
+            with recovery_db.begin() as db:
+                await demo_execution.reconcile_deriv(db, db.get(Order, "deriv-claim"), venue)
+        with recovery_db() as db:
+            assert db.get(Order, "deriv-claim").status == "OPEN"
+            assert db.get(Position, "deriv-claim").status == "OPEN"
+            assert db.get(Settlement, "deriv-claim") is None
+    else:
+        for _ in range(2):
+            with recovery_db.begin() as db:
+                await demo_execution.reconcile_deriv(db, db.get(Order, "deriv-claim"), venue)
+        with recovery_db() as db:
+            entry = db.get(Settlement, "deriv-claim")
+            assert entry.gross_pnl == Decimal("0.80")
+            assert entry.fees == Decimal("0.10")
+            assert entry.net_pnl == Decimal("0.70")
+            assert entry.payout == Decimal("1.80")
+            assert db.get(Position, "deriv-claim").status == "SETTLED"
+            assert db.get(Order, "deriv-claim").status == "SETTLED"
+            assert db.scalar(select(func.count()).select_from(Settlement)) == 1
+    with recovery_db() as db:
+        assert db.scalar(select(func.count()).select_from(Fill)) == 1
+        assert db.scalar(select(func.count()).select_from(Fee)) == 1
+    venue.reconcile_demo.assert_awaited_once_with("123")

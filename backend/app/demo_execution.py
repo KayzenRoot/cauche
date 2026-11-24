@@ -10,7 +10,7 @@ from .domain import Decision
 from .execution import amount, emit, moment, new_order, record_fill, record_settlement
 from .integrations import Deriv, Kalshi, VenueError
 from .market_data import deriv_symbol
-from .models import Bot, ExchangeConnection, Order, OrderIntent, Position, RiskConfig, StrategyConfig
+from .models import Bot, ExchangeConnection, Fee, Order, OrderIntent, Position, RiskConfig, StrategyConfig
 from .quant.types import decimal
 from .security import decrypt_credentials
 
@@ -38,7 +38,7 @@ async def has_unmanaged_exposure(venue) -> bool:
     )
 
 
-def confirmation_amount(value, *, stored: bool = True) -> Decimal:
+def confirmation_amount(value, *, stored: bool = True, signed: bool = False) -> Decimal:
     """Validate normalized exact amounts before any accounting mutation."""
     if isinstance(value, bool) or not isinstance(value, (Decimal, str, int)):
         raise ValueError("INVALID_BROKER_CONFIRMATION")
@@ -47,8 +47,8 @@ def confirmation_amount(value, *, stored: bool = True) -> Decimal:
     except ValueError:
         raise ValueError("INVALID_BROKER_CONFIRMATION") from None
     # MONEY columns use Numeric(24, 8). Reject rather than silently round.
-    if number < ZERO or (stored and (
-        number >= Decimal("1e16") or number != number.quantize(Decimal("0.00000001"))
+    if (not signed and number < ZERO) or (stored and (
+        number.copy_abs() >= Decimal("1e16") or number != number.quantize(Decimal("0.00000001"))
     )):
         raise ValueError("INVALID_BROKER_CONFIRMATION")
     return number
@@ -197,18 +197,58 @@ async def recover_claim(db: Session, bot: Bot, venue, intent: OrderIntent) -> No
 
 
 async def reconcile_deriv(db: Session, order: Order, venue: Deriv) -> None:
-    result = await venue.reconcile_demo(order.broker_id)
-    if result["currency"] != "USD":
-        raise ValueError("UNSUPPORTED_CURRENCY")
-    if result["status"] != "SETTLED":
+    if order.status == "SETTLED":
         return
-    profit = amount(result["profit"])
-    # Deriv settles the contract in one broker-reported net profit. Any explicit
-    # commission returned by the adapter must already be reflected in that total.
-    record_settlement(
-        db, order, gross=profit + amount(result.get("fee")), payout=amount(result["payout"]),
-        timestamp=moment(int(result.get("settled_at") or result["observed_at"])),
-    )
+    if (
+        order.mode != "BROKER_DEMO" or order.exchange != "DERIV"
+        or order.source != BROKER_SOURCE or order.currency != "USD"
+        or not order.broker_id
+    ):
+        raise ValueError("INVALID_BROKER_SETTLEMENT")
+    result = await venue.reconcile_demo(order.broker_id)
+    if (
+        not isinstance(result, dict) or result.get("broker_id") != order.broker_id
+        or result.get("source") != "DERIV_DEMO"
+        or result.get("status") not in ("OPEN", "SETTLED")
+    ):
+        raise ValueError("INVALID_BROKER_SETTLEMENT")
+    if result.get("currency") != "USD":
+        raise ValueError("UNSUPPORTED_CURRENCY")
+    if confirmation_amount(result.get("price")) != order.price:
+        raise ValueError("INVALID_BROKER_SETTLEMENT")
+    if result["status"] == "OPEN":
+        return
+
+    position = db.get(Position, order.id)
+    if (
+        position is None or position.status != "OPEN" or position.currency != "USD"
+        or position.quantity != 1 or order.quantity != 1
+        or position.exposure != order.price
+    ):
+        raise ValueError("INVALID_BROKER_SETTLEMENT")
+    payout = confirmation_amount(result.get("payout"))
+    booked_fee = confirmation_amount(sum(db.scalars(select(Fee.amount).where(Fee.order_id == order.id)), ZERO))
+    reported_fee = result.get("fee")
+    # Do not invent or double-count a commission. A divergence requires a
+    # separate verified accounting reconciliation before closing the position.
+    if reported_fee is not None and confirmation_amount(reported_fee) != booked_fee:
+        raise ValueError("INVALID_BROKER_SETTLEMENT")
+    profit = confirmation_amount(result.get("profit"), signed=True)
+    gross = confirmation_amount(payout - position.exposure, signed=True)
+    if profit != gross - booked_fee:
+        raise ValueError("INVALID_BROKER_SETTLEMENT")
+    settled_at, observed_at = result.get("settled_at"), result.get("observed_at")
+    if (
+        type(settled_at) is not int or type(observed_at) is not int
+        or not int(aware(order.timestamp).timestamp()) <= settled_at <= observed_at
+    ):
+        raise ValueError("INVALID_BROKER_SETTLEMENT")
+    try:
+        timestamp = moment(settled_at)
+        moment(observed_at)
+    except (OverflowError, OSError, ValueError):
+        raise ValueError("INVALID_BROKER_SETTLEMENT") from None
+    record_settlement(db, order, gross=gross, payout=payout, timestamp=timestamp)
 
 
 async def reconcile_kalshi(db: Session, order: Order, venue: Kalshi, *, cancel: bool) -> None:
