@@ -1,6 +1,7 @@
 """Compare a frozen, disposable source with its independently restored database."""
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from sqlalchemy import MetaData, create_engine, select, text
@@ -16,6 +17,10 @@ def require(condition, code):
 
 
 def owner_password() -> str:
+    if not sys.stdin.isatty():
+        value = sys.stdin.read().strip()
+        if value:
+            return value
     path = os.environ.get("CAUCHE_TEST_PASSWORD_FILE")
     if path:
         return Path(path).read_text(encoding="utf-8").strip()
