@@ -126,6 +126,25 @@ def persist_recovery_barrier(db, bot: Bot) -> None:
         update_state(db, bot, blocked=True)
 
 
+def execution_scope(row) -> tuple:
+    return row.run_id, row.mode, row.exchange, row.strategy, row.instrument
+
+
+def worker_context(db, bot: Bot):
+    run = db.get(StrategyRun, bot.run_id)
+    config = db.get(StrategyConfig, bot.strategy)
+    risk = db.get(RiskConfig, 1)
+    if (
+        run is None or config is None or risk is None
+        or execution_scope(run) != execution_scope(bot)
+        or bot.exchange not in {"DERIV", "KALSHI"}
+        or bot.mode not in {"REPLAY", "PAPER", "BROKER_DEMO"}
+        or bot.desired_state not in {"RUNNING", "PAUSED", "STOPPED"}
+    ):
+        raise ValueError("INVALID_WORKER_CONTEXT")
+    return run, config, risk
+
+
 def error_state(run_id: str | None, code: str, *, retryable: bool = True) -> None:
     with SessionLocal.begin() as db:
         bot = locked_bot(db)
@@ -167,9 +186,8 @@ async def step(ticker: MarketTicker | None = None) -> float:
             run_id = bot.run_id
             if not run_id:
                 return 1.0
-            run = db.get(StrategyRun, run_id)
-            config = db.get(StrategyConfig, bot.strategy)
-            risk = db.get(RiskConfig, 1)
+            run, config, risk = worker_context(db, bot)
+            observed_scope = execution_scope(bot)
             limits = {**risk.thresholds, "kill_switch": risk.kill_switch}
             can_open = update_state(
                 db, bot, blocked=risk.kill_switch or not config.enabled or has_ambiguous_claim(db, bot),
@@ -179,7 +197,11 @@ async def step(ticker: MarketTicker | None = None) -> float:
             strategy, version = run.strategy, run.strategy_version
             parameters = validate_parameters(strategy, run.parameters)
             connection = db.get(ExchangeConnection, exchange) if mode == "BROKER_DEMO" else None
+            connection_identity = None
             if connection:
+                if not connection.enabled or not connection.ciphertext or connection.status != "CONNECTED":
+                    raise ValueError("DEMO_NOT_CONFIGURED")
+                connection_identity = connection.ciphertext
                 venue = client(connection)
                 await reconcile(db, bot, venue, cancel=not can_open)
                 can_open = can_open and bot.desired_state == "RUNNING"
@@ -221,8 +243,19 @@ async def step(ticker: MarketTicker | None = None) -> float:
             bot = locked_bot(db)
             if not bot or bot.run_id != run_id or bot.cursor != cursor:
                 return MARKET_TICK
-            risk = db.get(RiskConfig, 1)
-            config = db.get(StrategyConfig, bot.strategy)
+            run, config, risk = worker_context(db, bot)
+            if (
+                execution_scope(bot) != observed_scope or run.strategy_version != version
+                or validate_parameters(run.strategy, run.parameters) != parameters
+            ):
+                raise ValueError("INVALID_WORKER_CONTEXT")
+            if mode == "BROKER_DEMO":
+                connection = db.get(ExchangeConnection, exchange)
+                if (
+                    not connection or not connection.enabled or connection.status != "CONNECTED"
+                    or connection.ciphertext != connection_identity
+                ):
+                    raise ValueError("DEMO_NOT_CONFIGURED")
             limits = {**risk.thresholds, "kill_switch": risk.kill_switch}
             can_open = update_state(
                 db, bot, blocked=risk.kill_switch or not config.enabled or has_ambiguous_claim(db, bot),
@@ -230,6 +263,8 @@ async def step(ticker: MarketTicker | None = None) -> float:
             if fixture and not can_open:
                 return 1.0
             if market is None:
+                if not fixture:
+                    raise ValueError("STALE_MARKET_DATA")
                 expire_replay(db, bot)
                 return 1.0
             save_market(db, bot, market, tick=ticker.latest(run_id) if ticker else None)
@@ -272,7 +307,7 @@ async def step(ticker: MarketTicker | None = None) -> float:
             with SessionLocal.begin() as db:
                 bot = locked_bot(db)
                 intent = db.get(OrderIntent, claimed)
-                if bot.run_id == run_id and intent.status == "SUBMITTING":
+                if bot and intent and bot.run_id == run_id and intent.status == "SUBMITTING":
                     await dispatch(db, bot, intent)
         return FIXTURE_TICK if fixture else MARKET_TICK
     except VenueError as error:

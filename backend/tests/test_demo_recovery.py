@@ -584,3 +584,110 @@ async def test_worker_lease_database_failure_never_runs_step(lease_engine, monke
     with pytest.raises(OperationalError):
         await worker.leased_step()
     tick.assert_not_awaited()
+
+
+# CD-08: persisted execution identity, configuration and observation boundaries.
+@pytest.mark.parametrize("kind", [
+    "missing-run", "missing-risk", "missing-strategy", "wrong-run-mode",
+    "wrong-run-exchange", "wrong-run-instrument", "wrong-run-strategy",
+    "wrong-run-id", "invalid-desired-state", "disabled-connection",
+    "missing-credentials", "disconnected-connection",
+])
+async def test_worker_invalid_context_fails_before_venue_or_observation(recovery_db, venue, monkeypatch, kind):
+    with recovery_db.begin() as db:
+        bot = db.get(Bot, 1)
+        run = db.get(StrategyRun, bot.run_id)
+        connection = db.get(ExchangeConnection, "KALSHI")
+        if kind == "missing-run":
+            db.delete(run)
+        elif kind == "missing-risk":
+            db.delete(db.get(RiskConfig, 1))
+        elif kind == "missing-strategy":
+            db.delete(db.get(StrategyConfig, STRATEGY))
+        elif kind == "wrong-run-mode":
+            run.mode = "PAPER"
+        elif kind == "wrong-run-exchange":
+            run.exchange = "DERIV"
+        elif kind == "wrong-run-instrument":
+            run.instrument = "OTHER-MARKET"
+        elif kind == "wrong-run-strategy":
+            run.strategy = "KALSHI-STRAT-02"
+        elif kind == "wrong-run-id":
+            run.run_id = "other-run"
+        elif kind == "invalid-desired-state":
+            bot.desired_state = "INVALID"
+        elif kind == "disabled-connection":
+            connection.enabled = False
+        elif kind == "missing-credentials":
+            connection.ciphertext = None
+        else:
+            connection.status = "DISCONNECTED"
+    factory = Mock(side_effect=AssertionError("invalid context must not construct venue"))
+    monkeypatch.setattr(worker, "client", factory)
+    assert await worker.step() == worker.MARKET_TICK
+    factory.assert_not_called()
+    worker.observe.assert_not_awaited()
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        bot = db.get(Bot, 1)
+        assert bot.last_error == "INVALID_CONFIGURATION_OR_SOURCE"
+        assert bot.cursor == 0
+        assert db.scalar(select(func.count()).select_from(OrderIntent)) == 0
+        assert db.scalar(select(func.count()).select_from(Order)) == 0
+
+
+@pytest.mark.parametrize("kind", [
+    "run-version", "run-scope", "bot-and-run-scope", "credentials", "connection-disabled", "connection-status",
+])
+async def test_worker_discards_observation_when_context_changes(recovery_db, venue, monkeypatch, kind):
+    venue.verify_demo = AsyncMock(return_value={"currency": "USD", "balance": Decimal("100")})
+    monkeypatch.setattr(worker, "has_unmanaged_exposure", AsyncMock(return_value=False))
+    save_market = Mock(side_effect=AssertionError("stale observation must not persist"))
+    monkeypatch.setattr(worker, "save_market", save_market)
+
+    async def changed(*_args, **_kwargs):
+        with recovery_db.begin() as db:
+            bot = db.get(Bot, 1)
+            run = db.get(StrategyRun, bot.run_id)
+            connection = db.get(ExchangeConnection, "KALSHI")
+            if kind == "run-version":
+                run.strategy_version += 1
+            elif kind == "run-scope":
+                run.instrument = "OTHER-MARKET"
+            elif kind == "bot-and-run-scope":
+                bot.instrument = run.instrument = "OTHER-MARKET"
+            elif kind == "credentials":
+                connection.ciphertext = "changed-fixture"
+            elif kind == "connection-disabled":
+                connection.enabled = False
+            else:
+                connection.status = "DISCONNECTED"
+        return Mock()
+
+    monkeypatch.setattr(worker, "observe", AsyncMock(side_effect=changed))
+    assert await worker.step() == worker.MARKET_TICK
+    save_market.assert_not_called()
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        bot = db.get(Bot, 1)
+        assert bot.cursor == 0
+        assert bot.state == "ERROR" and bot.desired_state == "PAUSED"
+        assert bot.last_error == "INVALID_CONFIGURATION_OR_SOURCE"
+        assert db.scalar(select(func.count()).select_from(OrderIntent)) == 0
+
+
+async def test_worker_missing_live_observation_does_not_expire_replay(recovery_db, venue, monkeypatch):
+    venue.verify_demo = AsyncMock(return_value={"currency": "USD", "balance": Decimal("100")})
+    monkeypatch.setattr(worker, "has_unmanaged_exposure", AsyncMock(return_value=False))
+    monkeypatch.setattr(worker, "observe", AsyncMock(return_value=None))
+    expire = Mock(side_effect=AssertionError("live run is not a finite replay"))
+    monkeypatch.setattr(worker, "expire_replay", expire)
+    assert await worker.step() == worker.MARKET_TICK
+    expire.assert_not_called()
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        bot = db.get(Bot, 1)
+        assert bot.cursor == 0 and bot.desired_state == "RUNNING"
+        assert bot.state == "DISCONNECTED" and bot.last_error == "STALE_MARKET_DATA"
+        assert db.get(StrategyRun, bot.run_id).finished_at is None
+        assert db.scalar(select(func.count()).select_from(OrderIntent)) == 0
