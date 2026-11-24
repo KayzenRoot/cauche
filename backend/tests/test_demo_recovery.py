@@ -640,7 +640,9 @@ async def test_worker_invalid_context_fails_before_venue_or_observation(recovery
     "run-version", "run-scope", "bot-and-run-scope", "credentials", "connection-disabled", "connection-status",
 ])
 async def test_worker_discards_observation_when_context_changes(recovery_db, venue, monkeypatch, kind):
-    venue.verify_demo = AsyncMock(return_value={"currency": "USD", "balance": Decimal("100")})
+    venue.verify_demo = AsyncMock(return_value={
+        "currency": "USD", "balance": Decimal("100"), "source": "KALSHI_DEMO", "environment": "BROKER_DEMO",
+    })
     monkeypatch.setattr(worker, "has_unmanaged_exposure", AsyncMock(return_value=False))
     save_market = Mock(side_effect=AssertionError("stale observation must not persist"))
     monkeypatch.setattr(worker, "save_market", save_market)
@@ -677,7 +679,9 @@ async def test_worker_discards_observation_when_context_changes(recovery_db, ven
 
 
 async def test_worker_missing_live_observation_does_not_expire_replay(recovery_db, venue, monkeypatch):
-    venue.verify_demo = AsyncMock(return_value={"currency": "USD", "balance": Decimal("100")})
+    venue.verify_demo = AsyncMock(return_value={
+        "currency": "USD", "balance": Decimal("100"), "source": "KALSHI_DEMO", "environment": "BROKER_DEMO",
+    })
     monkeypatch.setattr(worker, "has_unmanaged_exposure", AsyncMock(return_value=False))
     monkeypatch.setattr(worker, "observe", AsyncMock(return_value=None))
     expire = Mock(side_effect=AssertionError("live run is not a finite replay"))
@@ -827,3 +831,39 @@ async def test_reconciliation_valid_deriv_route_is_read_only(recovery_db):
         assert db.get(Order, "deriv-router-intent").status == "OPEN"
         assert db.scalar(select(func.count()).select_from(Fill)) == 1
         assert db.scalar(select(func.count()).select_from(Settlement)) == 0
+
+
+# CD-10: account admission must never persist invalid balance or unmanaged exposure.
+@pytest.mark.parametrize("kind", ["balance-negative", "balance-nan", "balance-source", "inventory-invalid", "position", "resting"])
+async def test_worker_account_admission_blocks_before_accounting(recovery_db, venue, monkeypatch, kind):
+    payload = {
+        "currency": "USD", "balance": Decimal("100"), "source": "KALSHI_DEMO", "environment": "BROKER_DEMO",
+    }
+    venue.positions = AsyncMock(return_value=[])
+    venue.open_orders = AsyncMock(return_value=[])
+    if kind == "balance-negative":
+        payload["balance"] = "-1"
+    elif kind == "balance-nan":
+        payload["balance"] = "NaN"
+    elif kind == "balance-source":
+        payload["source"] = "KALSHI_PUBLIC"
+    elif kind == "inventory-invalid":
+        venue.positions.return_value = {}
+    elif kind == "position":
+        venue.positions.return_value = [{"quantity": Decimal("-1"), "exposure": Decimal("0.40")}]
+    else:
+        venue.open_orders.return_value = [{"broker_id": "fixture"}]
+    venue.verify_demo = AsyncMock(return_value=payload)
+    monkeypatch.setattr(worker, "observe", AsyncMock(return_value=Mock()))
+    persist = Mock(side_effect=AssertionError("unverified account must not persist observation"))
+    monkeypatch.setattr(worker, "save_market", persist)
+    assert await worker.step() == worker.MARKET_TICK
+    persist.assert_not_called()
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        bot = db.get(Bot, 1)
+        assert bot.cursor == 0 and bot.desired_state == "PAUSED" and bot.state == "ERROR"
+        expected = "UNMANAGED_DEMO_EXPOSURE" if kind in {"position", "resting"} else "INVALID_CONFIGURATION_OR_SOURCE"
+        assert bot.last_error == expected
+        assert db.scalar(select(func.count()).select_from(OrderIntent)) == 0
+        assert db.scalar(select(func.count()).select_from(Order)) == 0

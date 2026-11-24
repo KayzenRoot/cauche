@@ -10,10 +10,9 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .config import LOG_RETENTION_DAYS
 from .db import SessionLocal, engine, utcnow
-from .demo_execution import client, dispatch, has_unmanaged_exposure, reconcile
+from .demo_execution import client, dispatch, has_unmanaged_exposure, reconcile, verified_demo_balance
 from .domain import check_risk, evaluate, validate_parameters
 from .execution import (
-    amount,
     check_context,
     emit,
     execute_simulation,
@@ -230,10 +229,7 @@ async def step(ticker: MarketTicker | None = None) -> float:
         market = await observe(mode, exchange, instrument, cursor, parameters, strategy=strategy)
         broker_balance = None
         if mode == "BROKER_DEMO":
-            verified = await venue.verify_demo()
-            if verified["currency"] != "USD":
-                raise ValueError("UNSUPPORTED_CURRENCY")
-            broker_balance = amount(verified["balance"])
+            broker_balance = verified_demo_balance(exchange, await venue.verify_demo())
             if cursor == 0 and await has_unmanaged_exposure(venue):
                 error_state(run_id, "UNMANAGED_DEMO_EXPOSURE", retryable=False)
                 return MARKET_TICK

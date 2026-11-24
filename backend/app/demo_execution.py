@@ -21,21 +21,61 @@ BROKER_SOURCE = "OFFICIAL_DEMO"
 def client(connection: ExchangeConnection):
     if not connection.enabled or not connection.ciphertext:
         raise ValueError("DEMO_NOT_CONFIGURED")
+    if connection.exchange == "DERIV":
+        required, optional = {"app_id", "token"}, {"account_id"}
+    elif connection.exchange == "KALSHI":
+        required, optional = {"key_id", "private_key"}, set()
+    else:
+        raise ValueError("UNSUPPORTED_EXCHANGE")
     credentials = decrypt_credentials(connection.ciphertext)
+    if (
+        not isinstance(credentials, dict)
+        or not required <= set(credentials) <= required | optional
+        or any(not isinstance(value, str) or not value.strip() for value in credentials.values())
+    ):
+        raise ValueError("CREDENTIALS_UNAVAILABLE")
     if connection.exchange == "DERIV":
         return Deriv(credentials["app_id"], credentials["token"], credentials.get("account_id"))
-    if connection.exchange == "KALSHI":
-        return Kalshi(credentials["key_id"], credentials["private_key"])
-    raise ValueError("UNSUPPORTED_EXCHANGE")
+    return Kalshi(credentials["key_id"], credentials["private_key"])
 
 
 async def has_unmanaged_exposure(venue) -> bool:
+    """Only a valid, empty demo account inventory can permit a fresh run."""
     if isinstance(venue, Deriv):
-        return bool(await venue.portfolio())
+        portfolio = await venue.portfolio()
+        if not isinstance(portfolio, list):
+            raise ValueError("INVALID_DEMO_INVENTORY")
+        return bool(portfolio)
+    if not isinstance(venue, Kalshi):
+        raise ValueError("UNSUPPORTED_EXCHANGE")
     positions = await venue.positions()
-    return any(position["quantity"] != ZERO or position["exposure"] != ZERO for position in positions) or bool(
-        await venue.open_orders()
-    )
+    if not isinstance(positions, list):
+        raise ValueError("INVALID_DEMO_INVENTORY")
+    exposed = False
+    for position in positions:
+        if not isinstance(position, dict):
+            raise ValueError("INVALID_DEMO_INVENTORY")
+        quantity = confirmation_amount(position.get("quantity"), signed=True, stored=False)
+        exposure = confirmation_amount(position.get("exposure"), signed=True, stored=False)
+        exposed = exposed or quantity != ZERO or exposure != ZERO
+    if exposed:
+        return True
+    orders = await venue.open_orders()
+    if not isinstance(orders, list):
+        raise ValueError("INVALID_DEMO_INVENTORY")
+    return bool(orders)
+
+
+def verified_demo_balance(exchange: str, payload) -> Decimal:
+    if (
+        exchange not in {"DERIV", "KALSHI"} or not isinstance(payload, dict)
+        or payload.get("environment") != "BROKER_DEMO"
+        or payload.get("source") != f"{exchange}_DEMO"
+    ):
+        raise ValueError("INVALID_DEMO_BALANCE")
+    if payload.get("currency") != "USD":
+        raise ValueError("UNSUPPORTED_CURRENCY")
+    return confirmation_amount(payload.get("balance"))
 
 
 def confirmation_amount(value, *, stored: bool = True, signed: bool = False) -> Decimal:
