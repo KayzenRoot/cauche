@@ -1,0 +1,7 @@
+# CAU-REL-WO-001/OPS-01/CD-01 | Correção da prova de restauração
+
+Base 1431c185e74f613853fde37475a392ef7b5d612c, PR #15; CIs 45467463235 e 45467475755: 1427 Python, 4 E2E por CI, 8/10 jobs; ambos falharam exclusivamente em RESTORE_SCHEMA_MISMATCH após pg_restore. A mensagem antiga não identifica a diferença específica; não presumir igualdade nem atribuir causa definitiva. Seis fingerprints canônicos inalterados. 
+
+Correção: substituir comparação textual de repr de objetos de reflexão por catálogos nativos do PostgreSQL. Comparar tabelas, colunas em ordem lógica, tipo, default, nulabilidade, identidade, generated, collation, storage, constraints PK/FK/unique/check, índices, flags de validação, sequências, propriedade e estado de sequência. Diagnóstico por categoria e nome do objeto, sem dados ou segredos. Manter comparação integral das linhas, autenticação do proprietário, decriptação da fixture, backtest e Alembic. Não aceitar diferenças de estrutura, não alterar dump/restore nem afrouxar o CI. A comparação não comprova equivalência de ACL/owners (dump usa no-owner/no-privileges); a fronteira de autorização de produção continua gate próprio.
+
+Stop: ambos CIs completos, 1427 Python, 4 E2E cada, RESTORE_SCHEMA_CATALOG_OK, RESTORE_REHEARSAL_OK, RESTORE_OWNER_AUTH_OK, ENCRYPTED_CREDENTIAL_OK e Alembic sem drift. Se persistir divergência, investigar categoria reportada e corrigir no mesmo WO. NOT_TESTED até evidência. Sem deploy, alterações de produção, despesas, ordens, merge ou promoção de checkpoint.
