@@ -216,3 +216,13 @@ async def test_stream_reconnects_after_transport_error_and_yields_new_mark(monke
     finally:
         await stream.aclose()
     assert opened == closed
+
+
+async def test_duplicate_closed_candles_rejected_at_adapter():
+    candle = {"epoch": NOW - 300, "open": "1.10", "high": "1.12",
+              "low": "1.09", "close": "1.11"}
+    ws = Socket(rpc_reply("candles", [candle, dict(candle)]))
+    venue, opened, closed = public_adapter(ws)
+    with pytest.raises(VenueError, match="^INVALID_RESPONSE$"):
+        await venue.candles(SYMBOL, 300, 2)
+    assert opened == closed

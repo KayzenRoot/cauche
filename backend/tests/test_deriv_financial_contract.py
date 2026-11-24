@@ -244,3 +244,153 @@ async def test_valid_simulated_acknowledgement_preserves_exact_values_and_spot_l
     assert result["observed_at"] == NOW and result["source"] == "DERIV_DEMO"
     assert commands(socket) == ["balance", "contracts_for", "proposal", "buy"]
     assert opened == closed == [OTP]
+
+
+# CD-22: authenticated read-only inventory, statement and settlement contracts.
+def position(**overrides):
+    return {"contract_id": 182, "underlying_symbol": SYMBOL, "contract_type": "CALL",
+            "buy_price": "1.00000001", "payout": "1.85", "purchase_time": NOW - 5, **overrides}
+
+
+def transaction(**overrides):
+    return {"transaction_id": 183, "contract_id": 182, "action_type": "buy",
+            "amount": "-1.00000001", "transaction_time": NOW - 5, **overrides}
+
+
+def contract_state(**overrides):
+    return {"contract_id": 182, "currency": "USD", "is_sold": 1, "buy_price": "1",
+            "sell_price": "1.85", "profit": "0.85", "sell_time": NOW - 1, **overrides}
+
+
+def assert_read_only(socket, opened, closed, command):
+    assert commands(socket) == ["balance", command]
+    assert opened == closed == [OTP]
+
+
+@pytest.mark.parametrize("rows", [[], [position()], [position(), position(contract_id=183, contract_type="OTHER")]])
+async def test_portfolio_preserves_complete_inventory(rows):
+    venue, socket, _, opened, closed = fixture_adapter()
+    socket.values["portfolio"] = {"contracts": rows, "account_id": ACCOUNT, "currency": "USD"}
+    result = await venue.portfolio()
+    assert len(result) == len(rows)
+    assert [r["broker_id"] for r in result] == [str(r["contract_id"]) for r in rows]
+    assert all(r["price"] == Decimal("1.00000001") for r in result)
+    assert [r["side"] for r in result] == [r["contract_type"] for r in rows]
+    assert_read_only(socket, opened, closed, "portfolio")
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"contracts": None}, {"contracts": {}}, {"contracts": [None]},
+    {"contracts": [position(), position()]}, {"contracts": [position(contract_id=0)]},
+    {"contracts": [position(contract_id=True)]}, {"contracts": [position(contract_id=10**19)]},
+    {"contracts": [position(buy_price="0")]}, {"contracts": [position(payout="-1")]},
+    {"contracts": [position(purchase_time=0)]}, {"contracts": [position(purchase_time=NOW + 1)]},
+    {"contracts": [position(account_id="OTHER")]}, {"contracts": [position(currency="EUR")]},
+    {"contracts": [], "account_id": "OTHER"}, {"contracts": [], "currency": "EUR"},
+])
+async def test_invalid_inventory_never_looks_empty(payload):
+    venue, socket, _, opened, closed = fixture_adapter()
+    socket.values["portfolio"] = payload
+    with pytest.raises(VenueError, match="^INVALID_RESPONSE$"):
+        await venue.portfolio()
+    assert_read_only(socket, opened, closed, "portfolio")
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"date_from": 0}, {"date_from": True}, {"date_from": NOW + 1},
+    {"date_from": NOW, "limit": 0}, {"date_from": NOW, "limit": 101},
+    {"date_from": NOW, "limit": True}, {"date_from": NOW, "offset": -1},
+    {"date_from": NOW, "offset": 10001}, {"date_from": NOW, "offset": 0.5},
+])
+async def test_invalid_statement_range_never_opens_socket(kwargs):
+    venue, socket, routes, opened, _ = fixture_adapter()
+    with pytest.raises(VenueError, match="^INVALID_HISTORY_RANGE$"):
+        await venue.statement(**kwargs)
+    assert not socket.sent and not routes and not opened
+
+
+async def test_statement_exact_values_and_explicit_pagination():
+    venue, socket, _, opened, closed = fixture_adapter()
+    socket.values["statement"] = {"transactions": [
+        transaction(app_id=123, shortcode="fixture"),
+        transaction(transaction_id=184, action_type="sell", amount="1.85"),
+        {"transaction_id": 185, "action_type": "deposit", "transaction_time": NOW},
+    ]}
+    result = await venue.statement(date_from=NOW - 10, limit=3, offset=4)
+    assert result == [
+        {"transaction_id": "183", "broker_id": "182", "app_id": 123, "shortcode": "fixture",
+         "action": "buy", "amount": Decimal("-1.00000001"), "observed_at": NOW - 5,
+         "currency": "USD", "source": "DERIV_DEMO"},
+        {"transaction_id": "184", "broker_id": "182", "app_id": None, "shortcode": None,
+         "action": "sell", "amount": Decimal("1.85"), "observed_at": NOW - 5,
+         "currency": "USD", "source": "DERIV_DEMO"},
+    ]
+    assert socket.sent[-1] == {"statement": 1, "description": 1, "date_from": NOW - 10,
+                               "limit": 3, "offset": 4, "req_id": 2}
+    assert_read_only(socket, opened, closed, "statement")
+
+
+async def test_explicit_empty_statement_is_valid():
+    venue, socket, _, opened, closed = fixture_adapter()
+    socket.values["statement"] = {"transactions": []}
+    assert await venue.statement(date_from=NOW) == []
+    assert_read_only(socket, opened, closed, "statement")
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"transactions": None}, {"transactions": {}}, {"transactions": [None]},
+    {"transactions": [transaction(), transaction(action_type="sell")]},
+    {"transactions": [transaction(), transaction(transaction_id=184), transaction(transaction_id=185)]},
+    {"transactions": [transaction(transaction_id=0)]}, {"transactions": [transaction(transaction_id=True)]},
+    {"transactions": [transaction(contract_id=-1)]}, {"transactions": [transaction(contract_id=True)]},
+    {"transactions": [transaction(transaction_time=NOW - 11)]},
+    {"transactions": [transaction(transaction_time=NOW + 1)]},
+    {"transactions": [transaction(action_type=None)]}, {"transactions": [transaction(amount="NaN")]},
+    {"transactions": [transaction(account_id="OTHER")]}, {"transactions": [transaction(currency="EUR")]},
+    {"transactions": [], "currency": "EUR"},
+])
+async def test_invalid_statement_fails_closed(payload):
+    venue, socket, _, opened, closed = fixture_adapter()
+    socket.values["statement"] = payload
+    with pytest.raises(VenueError, match="^INVALID_RESPONSE$"):
+        await venue.statement(date_from=NOW - 10, limit=2)
+    assert_read_only(socket, opened, closed, "statement")
+
+
+@pytest.mark.parametrize("changes", [
+    {"contract_id": 183}, {"contract_id": True}, {"contract_id": 0},
+    {"account_id": "OTHER"}, {"account_id": []}, {"currency": "EUR"},
+    {"is_sold": 2}, {"is_sold": True}, {"buy_price": "0"}, {"sell_price": "-1"},
+    {"commission": "-0.01"}, {"sell_time": 0}, {"sell_time": NOW + 1},
+    {"sell_time": True}, {"profit": "NaN"},
+])
+async def test_invalid_contract_state_does_not_return_settlement(changes):
+    venue, socket, _, opened, closed = fixture_adapter()
+    socket.values["proposal_open_contract"] = contract_state(**changes)
+    with pytest.raises(VenueError, match="^INVALID_RESPONSE$"):
+        await venue.reconcile_demo("182")
+    assert_read_only(socket, opened, closed, "proposal_open_contract")
+
+
+@pytest.mark.parametrize("sold", [False, True])
+async def test_contract_state_open_or_settled_exact_values(sold):
+    venue, socket, _, opened, closed = fixture_adapter()
+    row = contract_state(account_id=ACCOUNT, is_sold=int(sold), payout="1.85", commission="0.01")
+    if sold:
+        del row["sell_time"]
+        row["date_settlement"] = NOW - 1
+        row["profit"] = "0.84"
+    socket.values["proposal_open_contract"] = row
+    result = await venue.reconcile_demo("182")
+    assert result == {"broker_id": "182", "status": "SETTLED" if sold else "OPEN",
+                      "price": Decimal(1), "payout": Decimal("1.85"),
+                      "profit": Decimal("0.84") if sold else None,
+                      "fee": Decimal("0.01"), "settled_at": NOW - 1 if sold else None,
+                      "observed_at": NOW, "currency": "USD", "source": "DERIV_DEMO"}
+    assert_read_only(socket, opened, closed, "proposal_open_contract")
+
+
+def test_wire_number_refuses_loss_of_decimal_precision():
+    assert deriv._wire_number(Decimal("1.25")) == 1.25
+    with pytest.raises(VenueError, match="^INVALID_PRECISION$"):
+        deriv._wire_number(Decimal("999999999999999.1234567890123456"))

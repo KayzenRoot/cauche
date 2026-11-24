@@ -559,24 +559,35 @@ class Deriv:
         async with self._demo_socket() as (websocket, account):
             await self._balance(websocket, account)
             payload = object_(await self._rpc(websocket, "portfolio", {"portfolio": 1}))
-        return [
-            {
-                "broker_id": str(number(row.get("contract_id"))),
+        _check_account_fields(payload, account)
+        now = int(time.time())
+        result = []
+        seen = set()
+        for row in map(object_, array(payload.get("contracts"))):
+            _check_account_fields(row, account)
+            broker_id = _contract_id(row.get("contract_id"))
+            price, payout = decimal(row.get("buy_price")), decimal(row.get("payout"))
+            observed_at = number(row.get("purchase_time"))
+            if broker_id in seen or price <= 0 or payout < 0 or not 0 < observed_at <= now:
+                raise VenueError("INVALID_RESPONSE")
+            seen.add(broker_id)
+            result.append({
+                "broker_id": str(broker_id),
                 "instrument": identifier(string(row.get("underlying_symbol")), _SYMBOL),
                 "side": string(row.get("contract_type")),
-                "price": decimal(row.get("buy_price")),
-                "payout": decimal(row.get("payout")),
-                "observed_at": number(row.get("purchase_time")),
-            }
-            for row in map(object_, array(payload.get("contracts")))
-        ]
+                "price": price,
+                "payout": payout,
+                "observed_at": observed_at,
+            })
+        return result
 
     async def statement(
         self, *, date_from: int, limit: int = 100, offset: int = 0
     ) -> list[dict]:
         """Provide venue transaction IDs for manual recovery of ambiguous purchases."""
         if (
-            not 0 < date_from <= int(time.time())
+            type(date_from) is not int or type(limit) is not int or type(offset) is not int
+            or not 0 < date_from <= int(time.time())
             or not 1 <= limit <= 100
             or not 0 <= offset <= 10000
         ):
@@ -596,21 +607,50 @@ class Deriv:
                     },
                 )
             )
-        return [
-            {
-                "transaction_id": str(number(row.get("transaction_id"))),
-                "broker_id": str(number(row.get("contract_id"))),
+        _check_account_fields(payload, account)
+        rows = array(payload.get("transactions"))
+        if len(rows) > limit:
+            raise VenueError("INVALID_RESPONSE")
+        result = []
+        seen = set()
+        now = int(time.time())
+        for row in map(object_, rows):
+            _check_account_fields(row, account)
+            transaction_id = number(row.get("transaction_id"))
+            observed_at = number(row.get("transaction_time"))
+            action = string(row.get("action_type"))
+            if transaction_id <= 0 or transaction_id in seen or not date_from <= observed_at <= now:
+                raise VenueError("INVALID_RESPONSE")
+            seen.add(transaction_id)
+            if action not in {"buy", "sell"}:
+                continue
+            result.append({
+                "transaction_id": str(transaction_id),
+                "broker_id": str(_contract_id(row.get("contract_id"))),
                 "app_id": row.get("app_id"),
                 "shortcode": row.get("shortcode"),
-                "action": row["action_type"],
+                "action": action,
                 "amount": decimal(row.get("amount")),
-                "observed_at": number(row.get("transaction_time")),
+                "observed_at": observed_at,
                 "currency": account["currency"],
                 "source": "DERIV_DEMO",
-            }
-            for row in map(object_, array(payload.get("transactions", [])))
-            if row.get("action_type") in {"buy", "sell"}
-        ]
+            })
+        return result
+
+
+def _contract_id(value: Any) -> int:
+    contract = number(value)
+    if not 0 < contract < 10**19:
+        raise VenueError("INVALID_RESPONSE")
+    return contract
+
+
+def _check_account_fields(row: dict, account: dict) -> None:
+    if (
+        row.get("account_id", account["account_id"]) != account["account_id"]
+        or row.get("currency", account["currency"]) != account["currency"]
+    ):
+        raise VenueError("INVALID_RESPONSE")
 
 
 def _ordered_unique(rows: list[dict]) -> list[dict]:
@@ -655,8 +695,8 @@ def _tick(instrument: str, payload: Any) -> dict:
 def _contract_state(payload: Any, contract: int, account: dict) -> dict:
     row = object_(payload)
     if (
-        row.get("contract_id") != contract
-        or row.get("account_id") not in {None, account["account_id"]}
+        _contract_id(row.get("contract_id")) != contract
+        or row.get("account_id") not in (None, account["account_id"])
         or row.get("currency") != account["currency"]
     ):
         raise VenueError("INVALID_RESPONSE")
@@ -668,15 +708,23 @@ def _contract_state(payload: Any, contract: int, account: dict) -> dict:
     )
     price = decimal(row.get("buy_price"))
     payout = decimal(row.get("sell_price") if sold else row.get("payout"))
+    profit = decimal(row.get("profit")) if sold else None
+    fee = optional_decimal(row.get("commission"))
+    now = int(time.time())
+    if (
+        price <= 0 or payout < 0 or (fee is not None and fee < 0)
+        or (settled_at is not None and not 0 < settled_at <= now)
+    ):
+        raise VenueError("INVALID_RESPONSE")
     return {
         "broker_id": str(contract),
         "status": "SETTLED" if sold else "OPEN",
         "price": price,
         "payout": payout,
-        "profit": decimal(row.get("profit")) if sold else None,
-        "fee": optional_decimal(row.get("commission")),
+        "profit": profit,
+        "fee": fee,
         "settled_at": settled_at,
-        "observed_at": int(time.time()),
+        "observed_at": now,
         "currency": account["currency"],
         "source": "DERIV_DEMO",
     }
