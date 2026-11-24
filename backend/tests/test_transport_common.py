@@ -217,3 +217,32 @@ async def test_socket_options_disable_proxy_and_receive_strict_json(monkeypatch)
     assert options["proxy"] is None
     assert options["additional_headers"] == {"X-Fixture": "local"}
     assert options["logger"] is common._socket_logger
+
+
+@pytest.mark.parametrize("method,mutation", [("POST", False), ("GET", True), ("DELETE", True)])
+async def test_single_attempt_budget_for_non_read_or_mutation(transport_clock, method, mutation):
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(503)
+
+    with pytest.raises(VenueError, match="^UPSTREAM_UNAVAILABLE$") as caught:
+        await common.request_json(method, URL, mutation=mutation, transport=httpx.MockTransport(respond))
+    assert caught.value.outcome_unknown is mutation
+    assert len(calls) == 1
+    transport_clock.assert_not_awaited()
+
+
+async def test_read_retry_default_backoff_and_fresh_auth(transport_clock):
+    calls = []
+
+    def respond(request):
+        calls.append(request.headers["X-Fixture"])
+        return httpx.Response(503) if len(calls) < 3 else httpx.Response(200, json={"ok": True})
+
+    signer = Mock(side_effect=[{"X-Fixture": "1"}, {"X-Fixture": "2"}, {"X-Fixture": "3"}])
+    assert await common.request_json("GET", URL, auth=signer, transport=httpx.MockTransport(respond)) == {"ok": True}
+    assert calls == ["1", "2", "3"]
+    assert signer.call_count == 3
+    assert [call.args[0] for call in transport_clock.await_args_list] == [0.5, 1.0]

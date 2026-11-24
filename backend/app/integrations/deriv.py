@@ -89,7 +89,10 @@ class Deriv:
     @staticmethod
     def _demo_url(raw: Any) -> str:
         try:
-            url = urlsplit(string(raw))
+            raw = string(raw)
+            if re.fullmatch(r"[\x21-\x7e]+", raw) is None:
+                raise ValueError()
+            url = urlsplit(raw)
             query = parse_qsl(url.query, strict_parsing=True, max_num_fields=1)
             if (
                 not raw.startswith(f"wss://{_HOST}{_DEMO_PATH}?")
@@ -117,9 +120,9 @@ class Deriv:
             pace_seconds=1,
             pace_bucket=_ACCOUNT_BUCKET,
         )
+        accounts = list(map(object_, array(payload.get("data"))))
         eligible = []
-        for raw in array(payload.get("data")):
-            entry = object_(raw)
+        for entry in accounts:
             if entry.get("account_type") != "demo" or entry.get("status") != "active":
                 continue
             account = identifier(string(entry.get("account_id")))
@@ -133,6 +136,10 @@ class Deriv:
         if len(eligible) != 1:
             raise VenueError("DEMO_ACCOUNT_REQUIRED")
         account, currency = eligible[0]
+        # An identifier appearing in conflicting account records cannot prove
+        # demo confinement, even if only one record is active and demo.
+        if sum(entry.get("account_id") == account for entry in accounts) != 1:
+            raise VenueError("DEMO_ACCOUNT_REQUIRED")
         otp = await request_json(
             "POST",
             f"{_ACCOUNTS}/{account}/otp",

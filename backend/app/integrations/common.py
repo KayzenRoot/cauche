@@ -181,7 +181,8 @@ async def request_json(
         trust_env=False,
         transport=transport,
     ) as client:
-        for attempt in range(attempts):
+        attempt = 0
+        while True:
             try:
                 await pace(pace_bucket or httpx.URL(url).host, pace_seconds)
                 response = await client.request(
@@ -210,10 +211,10 @@ async def request_json(
             delay = (
                 error.retry_after if error.retry_after is not None else 0.5 * 2**attempt
             )
-            if attempt == attempts - 1 or not error.retryable or delay > 5:
+            if attempt + 1 >= attempts or not error.retryable or delay > 5:
                 raise error from None
             await asyncio.sleep(delay)
-    raise RuntimeError("Unreachable HTTP retry state")
+            attempt += 1
 
 
 @asynccontextmanager
