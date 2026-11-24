@@ -867,3 +867,153 @@ async def test_worker_account_admission_blocks_before_accounting(recovery_db, ve
         assert bot.last_error == expected
         assert db.scalar(select(func.count()).select_from(OrderIntent)) == 0
         assert db.scalar(select(func.count()).select_from(Order)) == 0
+
+
+# CD-11: remaining statement paths and local ledger scope invariants.
+async def test_kalshi_open_snapshot_reconciles_without_ledger_mutation(recovery_db, venue):
+    seed_kalshi_order(recovery_db)
+    venue.reconcile_demo.return_value = kalshi_snapshot()
+    for _ in range(2):
+        with recovery_db.begin() as db:
+            await demo_execution.reconcile(db, db.get(Bot, 1), venue, cancel=False)
+    assert venue.reconcile_demo.await_count == 2
+    venue.cancel_demo.assert_not_awaited()
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        order = db.get(Order, "claim-fixture")
+        assert order.status == "OPEN" and order.remaining_quantity == Decimal("1")
+        assert db.get(Position, order.id) is None
+        assert db.scalar(select(func.count()).select_from(Fill)) == 0
+
+
+@pytest.mark.parametrize("kind", [
+    "timestamp-overflow", "zero-fill", "fractional-fill", "non-object-resolution",
+    "wrong-event", "unknown-result", "non-object-envelope", "non-list-fills", "non-list-settlements",
+])
+async def test_kalshi_remaining_invalid_snapshot_paths(recovery_db, kind):
+    seed_kalshi_order(recovery_db)
+    fill = kalshi_fill("fill-one")
+    resolution = kalshi_resolution()
+    payload = kalshi_snapshot(filled="0.5", remaining="0", state="PARTIAL", fee="0.01",
+                              fills=[fill], settlements=[resolution])
+    if kind == "timestamp-overflow":
+        fill["observed_at"] = 10**30
+    elif kind == "zero-fill":
+        fill["quantity"] = Decimal("0")
+    elif kind == "fractional-fill":
+        fill["quantity"] = Decimal("0.501")
+    elif kind == "non-object-resolution":
+        payload["settlements"] = [None]
+    elif kind == "wrong-event":
+        with recovery_db.begin() as db:
+            order = db.get(Order, "claim-fixture")
+            order.data = {**order.data, "event": "EVENT-A"}
+        resolution["event_ticker"] = "EVENT-B"
+    elif kind == "unknown-result":
+        resolution["result"] = "UNKNOWN"
+    elif kind == "non-object-envelope":
+        payload = None
+    elif kind == "non-list-fills":
+        payload["fills"] = {}
+    else:
+        payload["settlements"] = {}
+    with pytest.raises(ValueError, match="INVALID_KALSHI_RECONCILIATION"):
+        await apply_kalshi(recovery_db, payload)
+    with recovery_db() as db:
+        order = db.get(Order, "claim-fixture")
+        assert order.status == "OPEN" and order.remaining_quantity == Decimal("1")
+        assert db.get(Position, order.id) is None
+        assert db.scalar(select(func.count()).select_from(Fill)) == 0
+        assert db.scalar(select(func.count()).select_from(Fee)) == 0
+        assert db.scalar(select(func.count()).select_from(Settlement)) == 0
+
+
+@pytest.mark.parametrize("kind", ["mode", "exchange", "source", "currency", "side", "broker_id"])
+async def test_kalshi_direct_guard_precedes_cancel_and_lookup(recovery_db, venue, kind):
+    seed_kalshi_order(recovery_db)
+    values = {"mode": "PAPER", "exchange": "DERIV", "source": "SIMULATED_FIXTURE",
+              "currency": "EUR", "side": "CALL", "broker_id": None}
+    with pytest.raises(ValueError, match="INVALID_KALSHI_RECONCILIATION"):
+        with recovery_db.begin() as db:
+            order = db.get(Order, "claim-fixture")
+            setattr(order, kind, values[kind])
+            await demo_execution.reconcile_kalshi(db, order, venue, cancel=True)
+    venue.reconcile_demo.assert_not_awaited()
+    venue.cancel_demo.assert_not_awaited()
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        assert db.get(Order, "claim-fixture").status == "OPEN"
+        assert db.scalar(select(func.count()).select_from(Fill)) == 0
+
+
+@pytest.mark.parametrize("kind", [
+    "position-missing", "position-quantity", "position-run", "position-instrument",
+    "fill-run", "fill-strategy", "fee-run", "fee-currency", "fee-source",
+])
+async def test_kalshi_rejects_corrupted_booked_scope_or_position(recovery_db, kind):
+    seed_kalshi_order(recovery_db)
+    fill = kalshi_fill("fill-one")
+    payload = kalshi_snapshot(filled="0.5", remaining="0", state="PARTIAL", fee="0.01", fills=[fill])
+    await apply_kalshi(recovery_db, payload)
+    with recovery_db.begin() as db:
+        position = db.get(Position, "claim-fixture")
+        if kind == "position-missing":
+            db.delete(position)
+        elif kind == "position-quantity":
+            position.quantity = Decimal("0.25")
+        elif kind == "position-run":
+            position.run_id = "other-run"
+        elif kind == "position-instrument":
+            position.instrument = "OTHER"
+        elif kind == "fill-run":
+            db.scalar(select(Fill)).run_id = "other-run"
+        elif kind == "fill-strategy":
+            db.scalar(select(Fill)).strategy = "KALSHI-STRAT-02"
+        elif kind == "fee-run":
+            db.scalar(select(Fee)).run_id = "other-run"
+        elif kind == "fee-currency":
+            db.scalar(select(Fee)).currency = "EUR"
+        else:
+            db.scalar(select(Fee)).source = "SIMULATED_FIXTURE"
+    payload["settlements"] = [kalshi_resolution()]
+    with pytest.raises(ValueError, match="INVALID_KALSHI_RECONCILIATION"):
+        await apply_kalshi(recovery_db, payload)
+    with recovery_db() as db:
+        assert db.get(Order, "claim-fixture").status == "PARTIAL"
+        assert db.get(Settlement, "claim-fixture") is None
+        assert db.scalar(select(func.count()).select_from(Fill)) == 1
+        assert db.scalar(select(func.count()).select_from(Fee)) == 1
+
+
+async def test_kalshi_orphan_position_without_fill_is_not_adopted(recovery_db):
+    seed_kalshi_order(recovery_db)
+    with recovery_db.begin() as db:
+        order = db.get(Order, "claim-fixture")
+        db.add(Position(
+            id=order.id, order_id=order.id, mode=order.mode, exchange=order.exchange,
+            strategy=order.strategy, instrument=order.instrument, run_id=order.run_id,
+            source=order.source, currency="USD", side=order.side, status="OPEN",
+            quantity=Decimal("0.5"), exposure=Decimal("0.19"), timestamp=utcnow(),
+        ))
+    with pytest.raises(ValueError, match="INVALID_KALSHI_RECONCILIATION"):
+        await apply_kalshi(recovery_db, kalshi_snapshot())
+    with recovery_db() as db:
+        assert db.get(Position, "claim-fixture").quantity == Decimal("0.5")
+        assert db.get(Order, "claim-fixture").status == "OPEN"
+        assert db.scalar(select(func.count()).select_from(Fill)) == 0
+        assert db.get(Settlement, "claim-fixture") is None
+
+
+@pytest.mark.parametrize("result,payout,expected_net", [("NO", "0", "-0.39"), ("SCALAR", "0.25", "-0.14")])
+async def test_kalshi_alternative_resolution_exact_net(recovery_db, result, payout, expected_net):
+    seed_kalshi_order(recovery_db)
+    fill = kalshi_fill("fill-one", quantity="1")
+    snapshot = kalshi_snapshot(filled="1", remaining="0", state="FILLED", fee="0.01",
+                               fills=[fill], settlements=[kalshi_resolution(result=result, payout=payout)])
+    await apply_kalshi(recovery_db, snapshot)
+    with recovery_db() as db:
+        row = db.get(Settlement, "claim-fixture")
+        assert row.payout == Decimal(payout)
+        assert row.net_pnl == Decimal(expected_net)
+        assert row.fees == Decimal("0.01")
+        assert db.get(Position, "claim-fixture").status == "SETTLED"

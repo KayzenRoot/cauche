@@ -377,20 +377,28 @@ def kalshi_fill_snapshot(db: Session, order: Order, rows: list, *, reported: Dec
         key = fill.broker_id
         if (
             key not in normalized or key in booked or fill.id != digest(order.id, key)
-            or fill.mode != order.mode or fill.exchange != order.exchange
-            or fill.instrument != order.instrument or fill.currency != "USD"
+            or reconciliation_scope(fill) != reconciliation_scope(order)
+            or fill.currency != "USD"
             or fill.source != order.source
             or normalized[key] != (fill.quantity, fill.price, fill.fee, aware(fill.timestamp))
         ):
             raise ValueError("INVALID_KALSHI_RECONCILIATION")
         booked[key] = fill
-    booked_fees = {row.id: row.amount for row in db.scalars(select(Fee).where(Fee.order_id == order.id))}
+    fee_rows = db.scalars(select(Fee).where(Fee.order_id == order.id)).all()
+    if any(
+        reconciliation_scope(row) != reconciliation_scope(order)
+        or row.currency != "USD" or row.source != order.source for row in fee_rows
+    ):
+        raise ValueError("INVALID_KALSHI_RECONCILIATION")
+    booked_fees = {row.id: row.amount for row in fee_rows}
     if booked_fees != {row.id: row.fee for row in existing if row.fee > ZERO}:
         raise ValueError("INVALID_KALSHI_RECONCILIATION")
     position = db.get(Position, order.id)
     if existing:
         if (
             position is None or position.status != "OPEN" or position.side != order.side
+            or reconciliation_scope(position) != reconciliation_scope(order)
+            or position.order_id != order.id
             or position.currency != "USD" or position.source != order.source
             or position.quantity != sum((row.quantity for row in existing), ZERO)
             or position.exposure != sum((row.quantity * row.price for row in existing), ZERO)

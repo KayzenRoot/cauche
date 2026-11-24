@@ -241,3 +241,18 @@ def test_kalshi_partial_exceeding_total_is_rejected(boundary):
     create.assert_not_called()
     fill.assert_not_called()
     emit.assert_not_called()
+
+
+# CD-11: currency mismatch must not book a Deriv purchase.
+@pytest.mark.parametrize("currency", ["EUR", None])
+def test_deriv_acknowledgement_rejects_non_usd(boundary, currency):
+    db, _, create, fill, emit = boundary
+    intent = intent_for("DERIV")
+    payload = normalized_ack("DERIV")
+    payload["currency"] = currency
+    with pytest.raises(ValueError, match="UNSUPPORTED_CURRENCY"):
+        execution.acknowledge(db, intent, payload)
+    assert intent.status == "SUBMITTING" and intent.response == {}
+    create.assert_not_called()
+    fill.assert_not_called()
+    emit.assert_not_called()
