@@ -1,0 +1,13 @@
+# CAU-MVP-001/CD-11 — cobertura residual e integridade do ledger Kalshi
+
+Status PROPOSED / NOT PROMOTED. HIGH_ASSURANCE; F01/#3 e F02/#4 parciais. CD-10 APPROVED no comentário 7137686190; CI 45436872422: 492 Python + 4 E2E, demo_execution 96% (350/13 não cobertas), worker 77%, backend 82% statements.
+
+## Context Lock
+Main a8e69195192a0abda82298927f0b0f231a86ea7b; base CD 0c9e5939e4403f43d875ef3b00f7decfcd257964; PR #2 head 7e6faee7c00cfd65628379576011e51f54a5ff8d preservado.
+Fingerprints: checkpoint b2f0247d36514b625b203cecf587432a957b2a66; ledger 2db4cb6daa284c8bffce82cdfca1a4efe8ea4ce4; scope 7084e1c86918b7716c023dc947c7a24efa28ce8a; DoD 6e73ebfa3a385fc7e49ff56f372856f84537ff15; architecture d536ac3f1ba924ef80299e6569d8b0ab25eff78d; requirements 4c8e80e8aa65cacc8040ec0dd96a46e385556c34.
+
+## Work Order
+Objetivo NECESSARY: atingir cobertura das 13 instruções restantes de demo_execution (linhas 128, 299-300, 328, 359, 398, 400, 418, 427, 431, 451, 464, 538 no base) com provas de comportamento; corrigir lacuna observada de escopo de fills, taxas e posições Kalshi previamente contabilizados (run/strategy e demais campos de escopo), sem adotar posição órfã. Ler demo_execution, execution, models, testes de acknowledgement/recovery, docs e CI. Arquivos: backend/app/demo_execution.py, backend/tests/test_demo_acknowledgement.py, backend/tests/test_demo_recovery.py, este documento. Sem alteração de adapters, schema, dependências, estratégia, modo, permissão ou destino; fora de escopo Deriv ledger adicional, recuperação histórica, fencing, PR #2, produção. Não alterar testes anteriores para obter cobertura, não inserir pragmas ou exclusões; objetivo 100% statements neste módulo, não declarar 100% branch ou projeto sem evidência. Preservar falha fechada e não corrigir ledger automaticamente.
+Proof obligations: 2 casos unitários de moeda Deriv, 28 cenários de integração por dialeto (56 novos), total 58 previstos; rota OPEN normal, timestamp não representável, quantidades inválidas, resolução/envelope inválido, guardas antes de cancel/lookup, divergência de escopo no ledger, posição órfã e resultados NO/SCALAR com PnL exato. CI completo e logs, regressão e segurança, SQLite/PostgreSQL com adapters mockados. Entregáveis: commit, Evidence Bundle, auditoria pt-BR. Stop: CI incompleto/falha/risco relevante; sem outro delta, merge, deploy, despesas, operação financeira ou promoção de checkpoint. Rollback via revert explícito sem force-push, sem apagar ledger.
+## Evidence Bundle preliminar
+NOT_TESTED até CI deste SHA. Nenhuma infraestrutura nova. Cobertura de linhas não comprova concorrência distribuída, aceitação oficial ou integridade de todos os contratos; revisão independente e branches/frontend pendentes.

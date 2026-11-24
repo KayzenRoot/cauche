@@ -1,0 +1,13 @@
+# CAU-MVP-001/CD-22 - inventário, extrato e liquidação Deriv
+
+Status PROPOSED / NOT PROMOTED. HIGH_ASSURANCE. F01/#3, F02/#4 e F04/#6 parciais. CD-21 APPROVED comentário 7139063555; CIs 45445868953/45445891817: 961 Python + 4 E2E, Deriv 290/304, backend 3811/4278; quatro módulos críticos 100%.
+
+## Context Lock
+Base 7448450b347f773e31ff681bf01c2fb6ebe89c04; main a8e69195192a0abda82298927f0b0f231a86ea7b; PR #2 7e6faee7c00cfd65628379576011e51f54a5ff8d.
+Fingerprints: checkpoint b2f0247d36514b625b203cecf587432a957b2a66; ledger 2db4cb6daa284c8bffce82cdfca1a4efe8ea4ce4; scope 7084e1c86918b7716c023dc947c7a24efa28ce8a; DoD 6e73ebfa3a385fc7e49ff56f372856f84537ff15; architecture d536ac3f1ba924ef80299e6569d8b0ab25eff78d; requirements 4c8e80e8aa65cacc8040ec0dd96a46e385556c34.
+
+## Work Order
+NECESSARY: completar cobertura residual Deriv, rejeitar inventário malformado/duplicado, identidade explícita divergente, IDs inválidos e valores ou timestamps incompatíveis; extrato exige lista explícita, paginação inteira limitada, IDs únicos e janela temporal válida, preserva montantes assinados sem inferir semântica de tarifas; liquidação valida identidade, is_sold, preço, payout, fee e timestamp; não inventa lucro ou fecha posição (ledger existente mantém invariantes contábeis). Ler Deriv, common, demo_execution, contratos e fontes canônicas. Arquivos: deriv.py, test_deriv_financial_contract.py, test_deriv_transport.py, este documento. Preservar tipos de contrato não suportados no inventário (exposição não gerenciada), extrato manual sem auto-reconciliação. Relógio local conservador; campos de identidade ausentes não autenticam resposta remota. Não alterar endpoints, estratégia, schema, dependência, CI, permissões, credenciais ou PR #2. Nenhuma operação financeira, tráfego real ou daemon. 
+Proof obligations: 3 inventários válidos, 16 inválidos, 9 ranges, 2 extratos válidos, 17 inválidos, 15 estados inválidos, 2 estados válidos, 1 precisão, 1 duplicidade candles (66 novos, 1027 Python previstos). MockTransport/sockets locais, regressão SQLite/PostgreSQL, E2E, segurança e 100% statements Deriv e dos quatro módulos existentes, sem exclusões artificiais. Sem afirmar validação oficial ou completude entre páginas do extrato. Entregáveis commit, CI, auditoria Evidence Bundle pt-BR. Stop: falha, CI incompleto, cobertura insuficiente ou risco relevante; sem novo delta, merge, deploy, despesas, operações financeiras ou promoção de checkpoint. Rollback via revert explícito sem force-push.
+## Evidence Bundle preliminar
+NOT_TESTED até logs do SHA resultante. F01/F02/F04 abertas, revisão independente, branches/frontend e aceitação oficial pendentes. Checkpoint não promovido.
