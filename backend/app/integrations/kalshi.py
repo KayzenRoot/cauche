@@ -74,6 +74,8 @@ class Kalshi:
         self._require_demo()
         key_id = identifier(self._key_id or "")
         if self._signer is None:
+            if not isinstance(self._private_key, str):
+                raise VenueError("AUTH_ERROR")
             try:
                 pem = (self._private_key or "").encode("ascii")
                 key = serialization.load_pem_private_key(pem, password=None)
@@ -149,14 +151,25 @@ class Kalshi:
                 params={**params, **({"cursor": cursor} if cursor else {})},
                 auth=auth,
             )
-            for row in array(page.get(key)):
-                yield object_(row)
-            cursor = page.get("cursor") or ""
-            if not cursor:
-                return
-            if not isinstance(cursor, str) or cursor in seen:
+            # Authenticated inventories must explicitly certify the end of
+            # pagination. Missing, null or non-string cursors are ambiguous.
+            next_cursor = page.get("cursor")
+            if next_cursor is None and not auth:
+                next_cursor = ""
+            if not isinstance(next_cursor, str) or next_cursor in seen:
                 raise VenueError("PAGINATION_INCOMPLETE")
-            seen.add(cursor)
+            if next_cursor and (
+                len(next_cursor) > 4096 or not next_cursor.strip()
+                or any(ord(char) < 32 or ord(char) == 127 for char in next_cursor)
+            ):
+                raise VenueError("PAGINATION_INCOMPLETE")
+            rows = [object_(row) for row in array(page.get(key))]
+            for row in rows:
+                yield row
+            if not next_cursor:
+                return
+            seen.add(next_cursor)
+            cursor = next_cursor
         raise VenueError("PAGINATION_INCOMPLETE")
 
     async def markets(
