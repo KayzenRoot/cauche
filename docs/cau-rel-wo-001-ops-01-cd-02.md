@@ -1,0 +1,7 @@
+# CAU-REL-WO-001/OPS-01/CD-02 | Comparação semântica de CHECK no restore
+
+Base 061ede8821c52d8931ea476d208896d20a971a72; PR #15. CIs 45468384289 e 45468399377: 1427 Python e 4 E2E por CI; 8/10 jobs aprovados, falha de restauração na categoria constraints em 16 tabelas. O diagnóstico não mostra expressões individuais; a hipótese de casts implícitos materializados pelo pg_dump ainda precisa ser comprovada.
+
+Correção: igualdade estrita de nomes, tipos e flags de todas as constraints; PK/FK/unique continuam comparadas integralmente. Apenas CHECK com definição textual divergente passa por reparsing das duas definições no PostgreSQL, em tabelas temporárias vazias LIKE da tabela correspondente, com os mesmos tipos reais. Comparar a saída canônica do parser, nunca remover casts por regex nem aceitar diferenças semânticas. Se divergência persistir, registrar nome e as duas definições canônicas (DDL sintético do CI, sem dados) e falhar. Todas as outras categorias, estados de sequência, dados, autenticação, decriptação e Alembic permanecem obrigatórios. Nenhuma alteração permanente do esquema ou produção.
+
+Acceptance: ambos CIs 5/5, 1427 Python, 4 E2E por CI, RESTORE_CONSTRAINTS_OK, RESTORE_SCHEMA_CATALOG_OK, RESTORE_REHEARSAL_OK, RESTORE_OWNER_AUTH_OK, ENCRYPTED_CREDENTIAL_OK e alembic sem drift. NOT_TESTED até execução. Sem envio de ordens, despesas, deploy, mutação de banco remoto, merge ou promoção de checkpoint. Preflight de infraestrutura somente após APPROVED.

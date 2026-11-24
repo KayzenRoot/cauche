@@ -106,9 +106,61 @@ def schema_signature(connection):
     return result
 
 
+def canonical_check(connection, table, definition):
+    """Reparse a CHECK in an empty temporary copy of the actual table.
+
+    pg_dump round-trips an expression through SQL, which may materialize implicit
+    casts. Use the same PostgreSQL parser and column types for both definitions.
+    No source rows, permanent schema, or constraint enforcement are changed.
+    """
+    quoted = connection.dialect.identifier_preparer.quote_identifier(table)
+    with connection.begin_nested():
+        connection.execute(text(
+            "CREATE TEMP TABLE restore_check_probe "
+            f"(LIKE public.{quoted}) ON COMMIT DROP"
+        ))
+        try:
+            # Definition comes exclusively from pg_get_constraintdef in CI.
+            connection.execute(text(
+                "ALTER TABLE pg_temp.restore_check_probe ADD CONSTRAINT probe " + definition
+            ))
+            return connection.execute(text(
+                "SELECT pg_get_constraintdef(oid, false) FROM pg_constraint "
+                "WHERE conrelid = 'pg_temp.restore_check_probe'::regclass "
+                "AND conname = 'probe'"
+            )).scalar_one()
+        finally:
+            connection.execute(text("DROP TABLE pg_temp.restore_check_probe"))
+
+
+def compare_constraints(original, recovered, before, after):
+    left = {(row[0], row[1]): row for row in before}
+    right = {(row[0], row[1]): row for row in after}
+    require(left.keys() == right.keys(), "RESTORE_CONSTRAINT_SET_MISMATCH")
+    normalized = 0
+    for key in sorted(left):
+        source, restored = left[key], right[key]
+        if source == restored:
+            continue
+        # Compare every flag and kind exactly; only CHECK expressions may have
+        # equivalent SQL spellings. Never normalize FK, unique or PK definitions.
+        if source[:3] != restored[:3] or source[4:] != restored[4:] or source[2] != "c":
+            raise SystemExit(f"RESTORE_CONSTRAINT_MISMATCH {key}")
+        source_sql = canonical_check(original, key[0], source[3])
+        restored_sql = canonical_check(recovered, key[0], restored[3])
+        if source_sql != restored_sql:
+            print(f"RESTORE_CHECK_DEFINITION_DIFFERENCE {key} source={source_sql} restored={restored_sql}")
+            raise SystemExit("RESTORE_CHECK_DEFINITION_MISMATCH")
+        normalized += 1
+    print(f"RESTORE_CONSTRAINTS_OK count={len(left)} reparsed={normalized}")
+
+
 def compare_schema(original, recovered):
     before, after = schema_signature(original), schema_signature(recovered)
     for category in before:
+        if category == "constraints":
+            compare_constraints(original, recovered, before[category], after[category])
+            continue
         if before[category] != after[category]:
             # Catalog object names only, not data, expressions or connection values.
             original_rows = before[category]
