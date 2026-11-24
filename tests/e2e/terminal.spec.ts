@@ -138,5 +138,22 @@ test('backtest result and encrypted connection settings through the interface', 
   await deriv.getByRole('button', { name: 'Desconectar', exact: true }).click();
   await confirm(page);
   await expect(deriv.getByText('Conexão removida')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Conta real · somente leitura', exact: true }).click();
+  await deriv.getByLabel('ID do aplicativo', { exact: true }).fill('synthetic-real-app');
+  await deriv.getByLabel('Token da conta real', { exact: true }).fill('synthetic-real-fixture');
+  await deriv.getByLabel('ID da conta real', { exact: true }).fill('DOT-TEST-REAL');
+  await deriv.getByRole('checkbox', { name: 'Habilitar conexão', exact: true }).check();
+  await deriv.getByRole('button', { name: 'Salvar conexão' }).click();
+  await confirm(page);
+  await expect(deriv.getByText('Configuração salva')).toBeVisible();
+
+  const readOnly = await (await page.request.get('/api/admin/real-connections')).json();
+  const demo = await (await page.request.get('/api/admin/connections')).json();
+  expect(readOnly.items.find((row: { exchange: string }) => row.exchange === 'DERIV')).toMatchObject({
+    configured: true, environment: 'REAL_READ_ONLY', status: 'UNVERIFIED', balance: null,
+  });
+  expect(JSON.stringify(readOnly)).not.toContain('synthetic-real-fixture');
+  expect(demo.items.find((row: { exchange: string }) => row.exchange === 'DERIV').configured).toBe(false);
   await page.screenshot({ path: 'test-results/evidence/admin.png', fullPage: true });
 });

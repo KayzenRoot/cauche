@@ -9,10 +9,11 @@ from hashlib import sha256
 from .domain import Book, Candle, DerivQuote, Market
 from .fixtures import dataset
 from .integrations import Deriv, Kalshi, VenueError
-from .quant.types import Relation, decimal
+from .quant.types import BookLevel, Relation, decimal
 
 DERIV_SYMBOLS = {"EUR/USD": "frxEURUSD", "GBP/USD": "frxGBPUSD", "USD/JPY": "frxUSDJPY"}
 ZERO = Decimal("0")
+BOOK_LEVELS_PER_SIDE = 20
 
 
 def epoch() -> int:
@@ -91,8 +92,12 @@ async def deriv_observation(instrument: str, parameters: dict) -> Market:
             try:
                 quote = await venue.quote(native, side, stake, duration=duration // 60)
                 if quote.get("currency", "USD") == "USD":
+                    expiry = quote.get("expires_at")
                     quotes.append(DerivQuote(
                         side, Decimal(str(quote["stake"])), Decimal(str(quote["payout"])), duration,
+                        observed_at=int(quote["observed_at"]),
+                        spot=Decimal(str(quote["spot"])),
+                        expires_at=int(expiry) if expiry is not None else None,
                     ))
             except VenueError:
                 # A verified absence of a price or contract leaves the product unorderable.
@@ -103,8 +108,10 @@ async def deriv_observation(instrument: str, parameters: dict) -> Market:
     if not 0 <= observed_at - bars[-1].time <= 315 or not 0 <= observed_at - confirmation[-1].time <= 915:
         raise ValueError("STALE_MARKET_DATA")
     return Market(
-        "DERIV", instrument, native, bars[-1].time, "DERIV_OFFICIAL_PUBLIC",
-        bars, confirmation, contracts=tuple(quotes),
+        "DERIV", instrument, native, observed_at, "DERIV_OFFICIAL_PUBLIC",
+        bars, confirmation,
+        contracts=tuple(quote for quote in quotes
+                        if quote.observed_at is not None and 0 <= observed_at - quote.observed_at <= 10),
     )
 
 
@@ -202,6 +209,7 @@ async def kalshi_observation(instrument: str, *, demo: bool, scanner: bool = Fal
     if settled:
         outcome = {"YES": True, "NO": False}.get(meta.get("result"))
     book = None
+    levels = {}
     relation = None
     timestamp = now
     if meta.get("status") == "active" and not settled and now < meta["close_time"]:
@@ -234,6 +242,11 @@ async def kalshi_observation(instrument: str, *, demo: bool, scanner: bool = Fal
         closed_candles(rows, 300, timestamp), book=book, outcome=outcome, relation=relation,
         rules_id=relation.rules_id if relation else "",
         closes_at=meta["close_time"],
+        book_levels=tuple(
+            BookLevel(side, price, size)
+            for side, key in (("YES", "yes_bids"), ("NO", "no_bids"))
+            for price, size in levels.get(key, [])[:BOOK_LEVELS_PER_SIDE]
+        ) if book is not None else (),
     )
 
 

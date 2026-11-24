@@ -9,3 +9,7 @@ Private, demo-first trading intelligence terminal. Work Order **CAU-MVP-001**, t
 ## Local setup
 
 See [Deployment](docs/07-deployment.md) for bootstrap, health checks, backup and shutdown. The checkpoint and evidence establish what has been verified.
+
+The [free cloud account console](docs/cloudflare-free.md) is available for owner sign-in and separate demo and real account settings.
+
+The [research workspace](docs/research.md) adds chronological validation, execution evidence, and optional DeepSeek extraction.
