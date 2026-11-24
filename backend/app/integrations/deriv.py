@@ -348,6 +348,7 @@ class Deriv:
         amount = decimal(stake)
         if (
             side not in {"CALL", "PUT"}
+            or type(duration) is not int
             or not 1 <= duration <= 10080
             or duration_unit not in _TIME_UNITS
         ):
@@ -361,6 +362,7 @@ class Deriv:
         if not any(
             contract["contract_type"] == side
             and contract["category"] == "callput"
+            and type(contract["barriers"]) is int
             and contract["barriers"] in {0, 1}
             and _duration_seconds(
                 contract["min_duration"],
@@ -467,6 +469,13 @@ class Deriv:
         payout_floor = decimal(min_payout_ratio)
         if payout_floor < 1:
             raise VenueError("INVALID_PAYOUT_FLOOR")
+        if (expected_spot is None) != (max_spot_change is None):
+            raise VenueError("INVALID_SPOT_LIMIT")
+        if expected_spot is not None:
+            expected_spot = decimal(expected_spot)
+            max_spot_change = decimal(max_spot_change)
+            if expected_spot <= 0 or max_spot_change < 0:
+                raise VenueError("INVALID_SPOT_LIMIT")
         async with self._demo_socket() as (websocket, account):
             if account["currency"] != expected_currency:
                 raise VenueError("UNSUPPORTED_CURRENCY")
@@ -506,17 +515,30 @@ class Deriv:
                 payout = decimal(purchase.get("payout"))
                 if not 0 < price <= ask or payout < price * payout_floor:
                     raise VenueError("BROKER_QUOTE_DIVERGENCE")
+                contract_id = number(purchase.get("contract_id"))
+                transaction_id = number(purchase.get("transaction_id"))
+                balance_after = decimal(purchase.get("balance_after"))
+                purchased_at = number(purchase.get("purchase_time"))
+                if (
+                    not 0 < contract_id < 10**19
+                    or transaction_id <= 0
+                    or balance_after < 0
+                    or not quote["observed_at"] <= purchased_at <= int(time.time())
+                    or purchase.get("account_id", account["account_id"]) != account["account_id"]
+                    or purchase.get("currency", account["currency"]) != account["currency"]
+                ):
+                    raise VenueError("INVALID_RESPONSE")
                 return {
-                    "broker_id": str(number(purchase.get("contract_id"))),
-                    "transaction_id": str(number(purchase.get("transaction_id"))),
+                    "broker_id": str(contract_id),
+                    "transaction_id": str(transaction_id),
                     "client_order_id": client_order_id,
                     "status": "OPEN",
                     "price": price,
                     "quantity": Decimal(1),
                     "payout": payout,
-                    "balance": decimal(purchase.get("balance_after")),
+                    "balance": balance_after,
                     "currency": account["currency"],
-                    "observed_at": number(purchase.get("purchase_time")),
+                    "observed_at": purchased_at,
                     "source": "DERIV_DEMO",
                 }
             except VenueError as exc:
