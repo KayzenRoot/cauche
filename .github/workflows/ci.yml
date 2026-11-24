@@ -17,89 +17,14 @@ jobs:
       - run: python -m pip install uv==0.11.31
       - run: uv sync --locked
       - run: uv run --locked ruff check app tests alembic
-      - name: Start ephemeral PostgreSQL with per-run credentials
-        run: |
-          set -euo pipefail
-          umask 077
-          password="$(openssl rand -hex 24)"
-          echo "::add-mask::${password}"
-          password_file="$RUNNER_TEMP/cauche-ci-postgres-password"
-          env_file="$RUNNER_TEMP/cauche-ci-postgres.env"
-          printf '%s' "$password" > "$password_file"
-          chmod 600 "$password_file"
-          printf 'POSTGRES_PASSWORD=%s\n' "$password" > "$env_file"
-          chmod 600 "$env_file"
-          container="cauche-ci-postgres"
-          image="postgres:17-alpine@sha256:526f86d93c6ea08fd3f1fe5605650cacc781b2c6013169a0ad8f42c7d3d84f32"
-          docker rm -f -v "$container" >/dev/null 2>&1 || true
-          docker run -d --name "$container" --env-file "$env_file" \
-            -e POSTGRES_USER=cauche_test -e POSTGRES_DB=cauche_test \
-            -e POSTGRES_HOST_AUTH_METHOD=scram-sha-256 \
-            -e POSTGRES_INITDB_ARGS="--auth-host=scram-sha-256 --auth-local=trust" \
-            -p "127.0.0.1::5432" --shm-size=256m \
-            --health-cmd "pg_isready -U cauche_test -d cauche_test" \
-            --health-interval 2s --health-timeout 2s --health-retries 30 \
-            "$image"
-          port="$(docker port "$container" 5432/tcp | head -1 | awk -F: '{print $NF}')"
-          case "$port" in
-            ''|*[!0-9]*) echo "POSTGRES_LOOPBACK_PORT_UNAVAILABLE"; exit 1 ;;
-          esac
-          docker port "$container" 5432/tcp | grep -q '^127.0.0.1:' || { echo "POSTGRES_NOT_LOOPBACK_BOUND"; exit 1; }
-          echo "POSTGRES_LOOPBACK_BINDING_OK $(docker port "$container" 5432/tcp | head -1)"
-          for _ in $(seq 1 60); do
-            status="$(docker inspect -f '{{.State.Health.Status}}' "$container" 2>/dev/null || true)"
-            [ "$status" = "healthy" ] && break
-            sleep 2
-          done
-          status="$(docker inspect -f '{{.State.Health.Status}}' "$container" 2>/dev/null || true)"
-          if [ "$status" != "healthy" ]; then
-            docker logs "$container" || true
-            exit 1
-          fi
-          echo "PG_HBA_HOST_RULES:"
-          docker exec "$container" sh -c "grep -E '^host' /var/lib/postgresql/data/pg_hba.conf"
-          if docker exec "$container" sh -c "grep -E '^host' /var/lib/postgresql/data/pg_hba.conf | grep -v 'scram-sha-256'"; then
-            echo "POSTGRES_HOST_AUTH_NOT_SCRAM"
-            exit 1
-          fi
-          client_env="$RUNNER_TEMP/cauche-ci-postgres-client.env"
-          empty_env="$RUNNER_TEMP/cauche-ci-postgres-empty.env"
-          wrong_env="$RUNNER_TEMP/cauche-ci-postgres-wrong.env"
-          printf 'PGPASSWORD=%s\nPGSSLMODE=disable\n' "$password" > "$client_env"
-          printf 'PGPASSWORD=\nPGSSLMODE=disable\n' > "$empty_env"
-          printf 'PGPASSWORD=definitely-wrong\nPGSSLMODE=disable\n' > "$wrong_env"
-          chmod 600 "$client_env" "$empty_env" "$wrong_env"
-          docker run --rm --network host --env-file "$client_env" --entrypoint psql "$image" -w -h 127.0.0.1 -p "$port" -U cauche_test -d cauche_test -tAc "select current_user, inet_server_port()" | grep -qx "cauche_test|5432"
-          echo "POSTGRES_AUTH_POSITIVE_OK"
-          if no_password_output="$(docker run --rm --network host --env-file "$empty_env" --entrypoint psql "$image" -w -h 127.0.0.1 -p "$port" -U cauche_test -d cauche_test -tAc "select 1" 2>&1)"; then
-            echo "POSTGRES_AUTH_NO_PASSWORD_UNEXPECTEDLY_ALLOWED"
-            exit 1
-          fi
-          printf '%s' "$no_password_output" | grep -qiE 'password|authentication' || { echo "POSTGRES_AUTH_NO_PASSWORD_WRONG_FAILURE"; printf '%s\n' "$no_password_output"; exit 1; }
-          echo "POSTGRES_AUTH_NO_PASSWORD_DENIED"
-          if wrong_password_output="$(docker run --rm --network host --env-file "$wrong_env" --entrypoint psql "$image" -w -h 127.0.0.1 -p "$port" -U cauche_test -d cauche_test -tAc "select 1" 2>&1)"; then
-            echo "POSTGRES_AUTH_WRONG_PASSWORD_UNEXPECTEDLY_ALLOWED"
-            exit 1
-          fi
-          printf '%s' "$wrong_password_output" | grep -qiE 'password|authentication' || { echo "POSTGRES_AUTH_WRONG_PASSWORD_WRONG_FAILURE"; printf '%s\n' "$wrong_password_output"; exit 1; }
-          echo "POSTGRES_AUTH_WRONG_PASSWORD_DENIED"
-          rm -f "$client_env" "$empty_env" "$wrong_env"
-          {
-            echo "CAUCHE_TEST_POSTGRES_PORT=$port"
-            echo "CAUCHE_TEST_POSTGRES_PASSWORD_FILE=$password_file"
-            echo "CAUCHE_TEST_POSTGRES_CONTAINER=$container"
-            echo "CAUCHE_TEST_POSTGRES_ENV_FILE=$env_file"
-          } >> "$GITHUB_ENV"
+      - name: Start ephemeral PostgreSQL
+        run: python "$GITHUB_WORKSPACE/scripts/ci_postgres.py" start
       - run: uv run --locked python -m pytest --cov=app --cov-report=term-missing
       - run: uv run --locked bandit -r app --severity-level medium
       - run: uv run --locked pip-audit
-      - name: Clean up ephemeral PostgreSQL
+      - name: Stop ephemeral PostgreSQL
         if: always()
-        run: |
-          docker rm -f -v "${CAUCHE_TEST_POSTGRES_CONTAINER:-cauche-ci-postgres}" >/dev/null 2>&1 || true
-          rm -f "${CAUCHE_TEST_POSTGRES_PASSWORD_FILE:-$RUNNER_TEMP/cauche-ci-postgres-password}"
-          rm -f "${CAUCHE_TEST_POSTGRES_ENV_FILE:-$RUNNER_TEMP/cauche-ci-postgres.env}"
-          rm -f "$RUNNER_TEMP/cauche-ci-postgres-client.env" "$RUNNER_TEMP/cauche-ci-postgres-empty.env" "$RUNNER_TEMP/cauche-ci-postgres-wrong.env"
+        run: python "$GITHUB_WORKSPACE/scripts/ci_postgres.py" stop
 
   frontend:
     runs-on: ubuntu-24.04
@@ -137,18 +62,8 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: '24'
-      - name: Configure ephemeral secrets
-        run: |
-          set -euo pipefail
-          umask 077
-          test_key="$(python -c 'import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())')"
-          db_password="$(openssl rand -hex 24)"
-          echo "::add-mask::${test_key}"
-          echo "::add-mask::${db_password}"
-          env_file="$RUNNER_TEMP/cauche-compose.env"
-          printf 'CAUCHE_MASTER_KEY=%s\nPOSTGRES_PASSWORD=%s\n' "$test_key" "$db_password" > "$env_file"
-          chmod 600 "$env_file"
-          echo "CAUCHE_COMPOSE_ENV_FILE=$env_file" >> "$GITHUB_ENV"
+      - name: Configure ephemeral Compose environment
+        run: python scripts/ci_secrets.py compose
       - name: Validate and start Compose
         run: |
           docker compose --env-file "$CAUCHE_COMPOSE_ENV_FILE" config --quiet
@@ -158,16 +73,7 @@ jobs:
           docker compose --env-file "$CAUCHE_COMPOSE_ENV_FILE" exec -T api alembic current --check-heads
           docker compose --env-file "$CAUCHE_COMPOSE_ENV_FILE" exec -T api alembic check
       - name: Bootstrap ephemeral test owner
-        run: |
-          set -euo pipefail
-          umask 077
-          test_password="$(openssl rand -hex 24)"
-          echo "::add-mask::${test_password}"
-          password_file="$RUNNER_TEMP/cauche-test-owner-password"
-          printf '%s' "$test_password" > "$password_file"
-          chmod 600 "$password_file"
-          echo "CAUCHE_TEST_PASSWORD_FILE=$password_file" >> "$GITHUB_ENV"
-          printf '%s\n' "$test_password" | docker compose --env-file "$CAUCHE_COMPOSE_ENV_FILE" exec -T api python -m app.bootstrap --email owner@example.test --password-file /dev/stdin
+        run: python scripts/ci_secrets.py bootstrap
       - run: npm ci && npx playwright install --with-deps chromium && npm test
         working-directory: tests/e2e
       - run: npm audit --audit-level=moderate
@@ -192,11 +98,9 @@ jobs:
             docker compose logs --no-color --tail 60 || true
             docker compose down -v || true
           fi
-      - name: Remove ephemeral secret files
+      - name: Remove ephemeral files
         if: always()
-        run: |
-          rm -f "${CAUCHE_COMPOSE_ENV_FILE:-$RUNNER_TEMP/cauche-compose.env}"
-          rm -f "${CAUCHE_TEST_PASSWORD_FILE:-$RUNNER_TEMP/cauche-test-owner-password}"
+        run: python scripts/ci_secrets.py cleanup
 
   managed-cloudflare:
     runs-on: ubuntu-24.04
