@@ -5,7 +5,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .db import utcnow
+from .db import aware, utcnow
 from .domain import Decision
 from .execution import amount, emit, moment, new_order, record_fill, record_settlement
 from .integrations import Deriv, Kalshi, VenueError
@@ -129,16 +129,26 @@ def acknowledge(db: Session, intent: OrderIntent, result: dict) -> Order:
 
 
 async def dispatch(db: Session, bot: Bot, intent: OrderIntent) -> None:
+    # Only a newly claimed intent may be dispatched by the worker. Other
+    # states (in particular UNKNOWN) must never be rewritten or resubmitted.
+    if intent.status != "SUBMITTING":
+        return
     risk = db.get(RiskConfig, 1)
     config = db.get(StrategyConfig, bot.strategy)
     connection = db.get(ExchangeConnection, intent.exchange)
+    age = (utcnow() - aware(intent.timestamp)).total_seconds()
     if (
-        bot.mode != "BROKER_DEMO" or bot.desired_state != "RUNNING"
+        bot.mode != "BROKER_DEMO" or intent.mode != "BROKER_DEMO"
+        or bot.desired_state != "RUNNING" or not bot.run_id
+        or (bot.run_id, bot.exchange, bot.strategy, bot.instrument)
+        != (intent.run_id, intent.exchange, intent.strategy, intent.instrument)
+        or intent.exchange not in {"DERIV", "KALSHI"}
         or intent.risk.get("allowed") is not True
         or not risk or risk.kill_switch or risk.thresholds != intent.request.get("risk_thresholds")
         or not config or not config.enabled
-        or not connection or connection.status != "CONNECTED"
-        or utcnow().timestamp() - intent.timestamp.timestamp() > 20
+        or not connection or not connection.enabled or not connection.ciphertext
+        or connection.status != "CONNECTED"
+        or not 0 <= age <= 20
     ):
         intent.status = "CANCELLED"
         emit(db, intent, "ORDER", "PRE_DISPATCH_CANCELLED", "Order no longer eligible", order_id=intent.id)
