@@ -383,9 +383,9 @@ class Kalshi:
             if fixed_balance is not None
             else Decimal(number(row.get("balance"))) / 100
         )
-        if balance < 0:
-            raise VenueError("INVALID_RESPONSE")
         value = Decimal(number(row.get("portfolio_value"))) / 100
+        if balance < 0 or value < 0:
+            raise VenueError("INVALID_RESPONSE")
         return {
             "account_id": None,
             "currency": "USD",
@@ -513,14 +513,19 @@ class Kalshi:
         c_oid = identifier(client_order_id, r"[A-Za-z0-9_:+/=-]{1,64}")
         ticker = identifier(instrument, _TICKER)
         matches = []
+        seen = set()
         async for raw in self._pages(
             "/portfolio/orders",
             "orders",
             {"ticker": ticker, "limit": 200},
             auth=True,
         ):
-            if raw.get("client_order_id") == c_oid and raw.get("ticker") == ticker:
-                matches.append(_normalized_order(raw))
+            order = _normalized_order(raw)
+            if order["instrument"] != ticker or order["broker_id"] in seen:
+                raise VenueError("INVALID_RESPONSE", outcome_unknown=True)
+            seen.add(order["broker_id"])
+            if order["client_order_id"] == c_oid:
+                matches.append(order)
         if len(matches) > 1:
             raise VenueError("ORDER_CONFLICT", outcome_unknown=True)
         return matches[0] if matches else None
@@ -536,7 +541,7 @@ class Kalshi:
                 auth=True,
             )
         ]
-        if any(
+        if len({order["broker_id"] for order in orders}) != len(orders) or any(
             order["broker_status"] != "resting" or order["remaining_quantity"] <= 0
             for order in orders
         ):
@@ -570,7 +575,7 @@ class Kalshi:
         params: dict = {"limit": 200}
         if instrument is not None:
             params["ticker"] = identifier(instrument, _TICKER)
-        return [
+        rows = [
             {
                 "instrument": identifier(string(row.get("ticker")), _TICKER),
                 "quantity": decimal(row.get("position_fp")),
@@ -583,10 +588,16 @@ class Kalshi:
                 "/portfolio/positions", "market_positions", params, auth=True
             )
         ]
+        if len({row["instrument"] for row in rows}) != len(rows) or any(
+            (instrument is not None and row["instrument"] != instrument) or row["fee"] < 0
+            for row in rows
+        ):
+            raise VenueError("INVALID_RESPONSE")
+        return rows
 
     async def settlements(self, instrument: str) -> list[dict]:
         ticker = identifier(instrument, _TICKER)
-        return [
+        rows = [
             _settlement(row)
             async for row in self._pages(
                 "/portfolio/settlements",
@@ -594,8 +605,12 @@ class Kalshi:
                 {"ticker": ticker, "limit": 200},
                 auth=True,
             )
-            if row.get("ticker") == ticker
         ]
+        if len({row["settlement_id"] for row in rows}) != len(rows) or any(
+            row["instrument"] != ticker for row in rows
+        ):
+            raise VenueError("INVALID_RESPONSE")
+        return rows
 
     async def stream_ticker(self, instrument: str) -> AsyncIterator[dict]:
         ticker = identifier(instrument, _TICKER)
@@ -912,9 +927,18 @@ def _normalized_order(row: dict) -> dict:
     fee = decimal(row.get("maker_fees_dollars")) + decimal(
         row.get("taker_fees_dollars")
     )
+    client = row.get("client_order_id")
+    if client is not None:
+        identifier(client, r"[A-Za-z0-9_:+/=-]{1,64}")
+    price = _price(row.get(f"{side.lower()}_price_dollars"))
+    if fee < 0 or not 0 < price < 1:
+        raise VenueError("INVALID_RESPONSE")
+    opposite = row.get("no_price_dollars" if side == "YES" else "yes_price_dollars")
+    if opposite is not None and _price(opposite) != 1 - price:
+        raise VenueError("INVALID_RESPONSE")
     return {
         "broker_id": identifier(string(row.get("order_id"))),
-        "client_order_id": row.get("client_order_id"),
+        "client_order_id": client,
         "instrument": identifier(string(row.get("ticker")), _TICKER),
         "side": side,
         "status": _order_status(filled, remaining, quantity),
@@ -922,7 +946,7 @@ def _normalized_order(row: dict) -> dict:
         "quantity": quantity,
         "filled_quantity": filled,
         "remaining_quantity": remaining,
-        "price": _price(row.get(f"{side.lower()}_price_dollars")),
+        "price": price,
         "fee": fee,
         "observed_at": _optional_timestamp(
             row.get("last_update_time") or row.get("created_time")
@@ -948,7 +972,7 @@ def _fill(row: dict) -> dict:
         raise VenueError("INVALID_RESPONSE")
     quantity = _quantity(row.get("count_fp"))
     fee = decimal(row.get("fee_cost"))
-    if quantity <= 0 or fee < 0 or not isinstance(row.get("is_taker"), bool):
+    if quantity <= 0 or fee < 0 or observed <= 0 or not isinstance(row.get("is_taker"), bool):
         raise VenueError("INVALID_RESPONSE")
     return {
         "fill_id": identifier(string(row.get("fill_id") or row.get("trade_id"))),
@@ -970,12 +994,22 @@ def _settlement(row: dict) -> dict:
     event = identifier(string(row.get("event_ticker")), _TICKER)
     result = string(row.get("market_result")).upper()
     when = _timestamp(row.get("settled_time"))
+    if result not in {"YES", "NO", "SCALAR"} or when <= 0:
+        raise VenueError("INVALID_RESPONSE")
     value = row.get("value")
     if value is not None:
         payout = _price(Decimal(number(value)) / 100)
     elif result in {"YES", "NO"}:
         payout = Decimal(1 if result == "YES" else 0)
     else:
+        raise VenueError("INVALID_RESPONSE")
+    revenue = Decimal(number(row.get("revenue"))) / 100
+    yes_cost = decimal(row.get("yes_total_cost_dollars"))
+    no_cost = decimal(row.get("no_total_cost_dollars"))
+    fee = decimal(row.get("fee_cost"))
+    if min(revenue, yes_cost, no_cost, fee) < 0 or (
+        result in {"YES", "NO"} and payout != Decimal(1 if result == "YES" else 0)
+    ):
         raise VenueError("INVALID_RESPONSE")
     return {
         "settlement_id": f"{ticker}:{when}",
@@ -985,9 +1019,8 @@ def _settlement(row: dict) -> dict:
         "yes_payout": payout,
         "yes_quantity": _quantity(row.get("yes_count_fp")),
         "no_quantity": _quantity(row.get("no_count_fp")),
-        "revenue": Decimal(number(row.get("revenue"))) / 100,
-        "cost": decimal(row.get("yes_total_cost_dollars"))
-        + decimal(row.get("no_total_cost_dollars")),
-        "fee": decimal(row.get("fee_cost")),
+        "revenue": revenue,
+        "cost": yes_cost + no_cost,
+        "fee": fee,
         "observed_at": when,
     }

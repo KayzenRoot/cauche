@@ -197,3 +197,193 @@ async def test_public_discovery_empty_page_legacy_compatibility(payload, demo_pe
     venue = Kalshi("fixture-key", demo_pem, public=True, _transport=httpx.MockTransport(respond))
     assert await venue.markets() == []
     assert len(calls) == 1
+
+
+# CD-25: authenticated read-only portfolio and reconciliation contracts.
+def fixture_order(**overrides):
+    return {"order_id": "order-1", "ticker": "FIXTURE", "client_order_id": "client-1",
+            "outcome_side": "yes", "book_side": "bid", "fill_count_fp": "0",
+            "remaining_count_fp": "2", "initial_count_fp": "2", "status": "resting",
+            "maker_fees_dollars": "0", "taker_fees_dollars": "0",
+            "yes_price_dollars": "0.42", "no_price_dollars": "0.58", **overrides}
+
+
+def fixture_fill(**overrides):
+    return {"order_id": "order-1", "ticker": "FIXTURE", "fill_id": "fill-1",
+            "outcome_side": "yes", "count_fp": "1.25", "yes_price_dollars": "0.42",
+            "no_price_dollars": "0.58", "is_taker": True, "fee_cost": "0.0012",
+            "ts": 1700000000, **overrides}
+
+
+def fixture_settlement(**overrides):
+    return {"ticker": "FIXTURE", "event_ticker": "FIXTURE-EVENT", "market_result": "yes",
+            "yes_count_fp": "2", "no_count_fp": "0", "revenue": 200,
+            "yes_total_cost_dollars": "0.84", "no_total_cost_dollars": "0",
+            "fee_cost": "0.01", "settled_time": "2026-11-20T00:00:00Z", "value": 100, **overrides}
+
+
+def reader(demo_pem, replies):
+    calls = []
+
+    def respond(request):
+        assert request.method == "GET" and request.url.host == DEMO
+        assert request.headers["KALSHI-ACCESS-KEY"] == "fixture-key"
+        path = request.url.path.removeprefix(ROOT)
+        calls.append((path, dict(request.url.params)))
+        payload = replies[path]
+        return httpx.Response(200, json=payload(request) if callable(payload) else payload)
+
+    return Kalshi("fixture-key", demo_pem, _transport=httpx.MockTransport(respond)), calls
+
+
+@pytest.mark.parametrize("balance", [{"balance_dollars": "-0.01", "portfolio_value": 0},
+                                     {"balance": 100, "portfolio_value": -1}])
+async def test_negative_demo_balance_or_portfolio_value_rejected(demo_pem, balance):
+    venue, calls = reader(demo_pem, {"/portfolio/balance": balance})
+    with pytest.raises(VenueError, match="^INVALID_RESPONSE$"):
+        await venue.verify_demo()
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("rows,filter_ticker", [
+    ([position(), position()], None),
+    ([position("OTHER")], "FIXTURE"),
+    ([position(fees_paid_dollars="-0.01")], None),
+])
+async def test_inconsistent_positions_rejected(demo_pem, rows, filter_ticker):
+    venue, calls = reader(demo_pem, {"/portfolio/positions": {"market_positions": rows, "cursor": ""}})
+    with pytest.raises(VenueError, match="^INVALID_RESPONSE$"):
+        await venue.positions(filter_ticker)
+    assert calls[0][1].get("ticker") == filter_ticker
+
+
+async def test_filtered_position_preserves_signed_quantity(demo_pem):
+    venue, calls = reader(demo_pem, {"/portfolio/positions": {"market_positions": [position()], "cursor": ""}})
+    result = await venue.positions("FIXTURE")
+    assert result[0]["quantity"] == Decimal("-1.25")
+    assert calls[0][1]["ticker"] == "FIXTURE"
+
+
+@pytest.mark.parametrize("rows,expected", [
+    ([], None),
+    ([fixture_order(client_order_id="unrelated")], None),
+    ([fixture_order()], "order-1"),
+])
+async def test_find_order_only_returns_matching_identity(demo_pem, rows, expected):
+    venue, calls = reader(demo_pem, {"/portfolio/orders": {"orders": rows, "cursor": ""}})
+    found = await venue.find_demo_order("client-1", "FIXTURE")
+    assert (found["broker_id"] if found else None) == expected
+    assert calls[0][1]["ticker"] == "FIXTURE"
+
+
+@pytest.mark.parametrize("rows,code", [
+    ([fixture_order(), fixture_order(order_id="order-2")], "ORDER_CONFLICT"),
+    ([fixture_order(), fixture_order()], "INVALID_RESPONSE"),
+    ([fixture_order(ticker="OTHER")], "INVALID_RESPONSE"),
+])
+async def test_find_order_never_treats_conflict_as_absence(demo_pem, rows, code):
+    venue, _ = reader(demo_pem, {"/portfolio/orders": {"orders": rows, "cursor": ""}})
+    with pytest.raises(VenueError, match=f"^{code}$") as error:
+        await venue.find_demo_order("client-1", "FIXTURE")
+    assert error.value.outcome_unknown
+
+
+@pytest.mark.parametrize("rows", [
+    [fixture_order(), fixture_order()],
+    [fixture_order(status="canceled", remaining_count_fp="0")],
+    [fixture_order(remaining_count_fp="0")],
+])
+async def test_invalid_resting_inventory_rejected(demo_pem, rows):
+    venue, _ = reader(demo_pem, {"/portfolio/orders": {"orders": rows, "cursor": ""}})
+    with pytest.raises(VenueError, match="^INVALID_RESPONSE$"):
+        await venue.open_orders()
+
+
+@pytest.mark.parametrize("changes,code", [
+    ({"outcome_side": "other"}, "INVALID_RESPONSE"),
+    ({"book_side": "ask"}, "INVALID_RESPONSE"),
+    ({"initial_count_fp": "0"}, "INVALID_RESPONSE"),
+    ({"fill_count_fp": "3"}, "INVALID_RESPONSE"),
+    ({"status": "other"}, "INVALID_RESPONSE"),
+    ({"taker_fees_dollars": "-0.01"}, "INVALID_RESPONSE"),
+    ({"yes_price_dollars": "0"}, "INVALID_RESPONSE"),
+    ({"yes_price_dollars": "1"}, "INVALID_RESPONSE"),
+    ({"no_price_dollars": "0.57"}, "INVALID_RESPONSE"),
+    ({"client_order_id": []}, "INVALID_IDENTIFIER"),
+    ({"client_order_id": "bad space"}, "INVALID_IDENTIFIER"),
+    ({"created_time": "2026-11-20T00:00:00"}, "INVALID_RESPONSE"),
+])
+async def test_invalid_normalized_order_rejected(demo_pem, changes, code):
+    venue, _ = reader(demo_pem, {"/portfolio/orders": {"orders": [fixture_order(**changes)], "cursor": ""}})
+    with pytest.raises(VenueError, match=f"^{code}$"):
+        await venue.open_orders()
+
+
+@pytest.mark.parametrize("changes", [{"ticker": "OTHER"}, {"order_id": "other"}])
+async def test_reconcile_wrong_order_identity_blocks_further_reads(demo_pem, changes):
+    venue, calls = reader(demo_pem, {"/portfolio/orders/order-1": {"order": fixture_order(**changes)}})
+    with pytest.raises(VenueError, match="^INVALID_RESPONSE$"):
+        await venue.reconcile_demo("order-1", "FIXTURE")
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("fills", [
+    [fixture_fill(order_id="other")], [fixture_fill(ticker="OTHER")],
+    [fixture_fill(), fixture_fill()], [fixture_fill(outcome_side="other")],
+    [fixture_fill(no_price_dollars="0.57")], [fixture_fill(count_fp="0")],
+    [fixture_fill(fee_cost="-0.01")], [fixture_fill(is_taker=1)],
+    [fixture_fill(ts=0)], [fixture_fill(ts_ms=-1)],
+])
+async def test_invalid_reconciliation_fills_rejected_before_settlements(demo_pem, fills):
+    venue, calls = reader(demo_pem, {
+        "/portfolio/orders/order-1": {"order": fixture_order()},
+        "/portfolio/fills": {"fills": fills, "cursor": ""},
+    })
+    with pytest.raises(VenueError, match="^INVALID_RESPONSE$"):
+        await venue.reconcile_demo("order-1", "FIXTURE")
+    assert [path for path, _ in calls] == ["/portfolio/orders/order-1", "/portfolio/fills"]
+
+
+@pytest.mark.parametrize("changes", [
+    {"created_time": "2026-11-20T00:00:00Z"}, {"ts_ms": 1700000000123},
+])
+async def test_reconcile_fill_alternate_timestamp_formats(demo_pem, changes):
+    venue, _ = reader(demo_pem, {
+        "/portfolio/orders/order-1": {"order": fixture_order()},
+        "/portfolio/fills": {"fills": [fixture_fill(**changes)], "cursor": ""},
+        "/portfolio/settlements": {"settlements": [], "cursor": ""},
+    })
+    result = await venue.reconcile_demo("order-1", "FIXTURE")
+    assert result["fills"][0]["quantity"] == Decimal("1.25")
+    assert result["fills"][0]["observed_at"] > 0 and result["settlements"] == []
+
+
+@pytest.mark.parametrize("rows", [
+    [fixture_settlement(ticker="OTHER")],
+    [fixture_settlement(), fixture_settlement()],
+    [fixture_settlement(market_result="unknown")],
+    [fixture_settlement(market_result="yes", value=0)],
+    [fixture_settlement(market_result="scalar", value=None)],
+    [fixture_settlement(revenue=-1)],
+    [fixture_settlement(yes_total_cost_dollars="-0.01")],
+    [fixture_settlement(no_total_cost_dollars="-0.01")],
+    [fixture_settlement(fee_cost="-0.01")],
+    [fixture_settlement(settled_time="1970-01-01T00:00:00Z")],
+])
+async def test_invalid_settlement_rejected(demo_pem, rows):
+    venue, _ = reader(demo_pem, {"/portfolio/settlements": {"settlements": rows, "cursor": ""}})
+    with pytest.raises(VenueError, match="^INVALID_RESPONSE$"):
+        await venue.settlements("FIXTURE")
+
+
+@pytest.mark.parametrize("result,value,payout", [
+    ("yes", None, Decimal(1)), ("no", None, Decimal(0)),
+    ("scalar", 35, Decimal("0.35")),
+])
+async def test_settlement_normalizes_known_payout_without_synthesizing_scalar(demo_pem, result, value, payout):
+    venue, _ = reader(demo_pem, {"/portfolio/settlements": {
+        "settlements": [fixture_settlement(market_result=result, value=value)], "cursor": "",
+    }})
+    rows = await venue.settlements("FIXTURE")
+    assert rows[0]["yes_payout"] == payout
+    assert rows[0]["cost"] == Decimal("0.84")
