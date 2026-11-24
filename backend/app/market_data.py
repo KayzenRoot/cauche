@@ -9,7 +9,7 @@ from hashlib import sha256
 from .domain import Book, Candle, DerivQuote, Market
 from .fixtures import dataset
 from .integrations import Deriv, Kalshi, VenueError
-from .quant.types import Relation
+from .quant.types import Relation, decimal
 
 DERIV_SYMBOLS = {"EUR/USD": "frxEURUSD", "GBP/USD": "frxGBPUSD", "USD/JPY": "frxUSDJPY"}
 ZERO = Decimal("0")
@@ -36,18 +36,34 @@ def deriv_symbol(instrument: str) -> str:
     return DERIV_SYMBOLS.get(instrument, instrument)
 
 
+def candle_amount(value) -> Decimal:
+    if isinstance(value, bool) or not isinstance(value, (Decimal, str, int)):
+        raise ValueError("INVALID_MARKET_CANDLE")
+    try:
+        return decimal(value)
+    except ValueError:
+        raise ValueError("INVALID_MARKET_CANDLE") from None
+
+
 def closed_candles(rows: list[dict], interval: int, now: int) -> tuple[Candle, ...]:
+    if not isinstance(rows, list) or type(interval) is not int or interval <= 0 or type(now) is not int or now < 0:
+        raise ValueError("INVALID_MARKET_CANDLE")
     by_close = {}
     for row in rows:
-        closes_at = int(row["time"]) + interval
+        if not isinstance(row, dict) or type(row.get("time")) is not int or row["time"] < 0:
+            raise ValueError("INVALID_MARKET_CANDLE")
+        closes_at = row["time"] + interval
         if closes_at > now:
             continue
         candle = Candle(
-            closes_at, *(Decimal(str(row[key])) for key in ("open", "high", "low", "close")),
-            Decimal(str(row["volume"])) if row.get("volume") is not None else None,
+            closes_at, *(candle_amount(row.get(key)) for key in ("open", "high", "low", "close")),
+            candle_amount(row["volume"]) if row.get("volume") is not None else None,
         )
-        if not candle.valid():
+        if not candle.valid() or (candle.volume is not None and candle.volume < ZERO):
             raise ValueError("INVALID_MARKET_CANDLE")
+        previous = by_close.get(closes_at)
+        if previous is not None and previous != candle:
+            raise ValueError("CONFLICTING_MARKET_CANDLE")
         by_close[closes_at] = candle
     return tuple(by_close[time] for time in sorted(by_close))
 
@@ -59,6 +75,14 @@ async def deriv_observation(instrument: str, parameters: dict) -> Market:
         venue.candles(native, 300, 110),
         venue.candles(native, 900, 90),
     )
+    now = epoch()
+    bars = closed_candles(lower, 300, now)
+    if not bars or now - bars[-1].time > 315:
+        raise ValueError("STALE_MARKET_DATA")
+    # Confirmation bars cannot look ahead of the primary decision timestamp.
+    confirmation = closed_candles(higher, 900, bars[-1].time)
+    if not confirmation or now - confirmation[-1].time > 915:
+        raise ValueError("STALE_MARKET_DATA")
     stake = Decimal(str(parameters["stake"]))
     duration = int(parameters["duration_seconds"])
     quotes = []
@@ -73,13 +97,14 @@ async def deriv_observation(instrument: str, parameters: dict) -> Market:
             except VenueError:
                 # A verified absence of a price or contract leaves the product unorderable.
                 continue
-    now = epoch()
-    bars = closed_candles(lower, 300, now)
-    if not bars or now - bars[-1].time > 315:
+    # Quote reads take time too: do not publish an observation that expired
+    # while waiting for them, or accept a backward clock jump.
+    observed_at = epoch()
+    if not 0 <= observed_at - bars[-1].time <= 315 or not 0 <= observed_at - confirmation[-1].time <= 915:
         raise ValueError("STALE_MARKET_DATA")
     return Market(
         "DERIV", instrument, native, bars[-1].time, "DERIV_OFFICIAL_PUBLIC",
-        bars, closed_candles(higher, 900, now), contracts=tuple(quotes),
+        bars, confirmation, contracts=tuple(quotes),
     )
 
 
