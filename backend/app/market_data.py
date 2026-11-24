@@ -248,45 +248,86 @@ async def observe(mode: str, exchange: str, instrument: str, cursor: int, parame
 
 
 
+TICKER_RETRY_SECONDS = 5
+
+
 class MarketTicker:
-    """Bound one read-only venue subscription to the active run."""
+    """Bind a read-only subscription to the selected run, instrument and source."""
 
     def __init__(self):
-        self._run_id: str | None = None
+        self._selection: tuple[str, str, str] | None = None
         self._task: asyncio.Task | None = None
         self._latest: dict | None = None
 
     async def select(self, run_id: str | None, venue=None, instrument: str = "") -> None:
-        if self._run_id == run_id:
+        source = None
+        invalid = False
+        if run_id and venue is not None:
+            if isinstance(venue, Deriv):
+                source = "DERIV_PUBLIC"
+            elif isinstance(venue, Kalshi) and venue.source == "KALSHI_DEMO":
+                source = "KALSHI_DEMO"
+            else:
+                invalid = True
+        selection = (run_id, instrument, source) if run_id and instrument and source else None
+        invalid = invalid or bool(run_id and venue is not None and not instrument)
+        if selection == self._selection and not invalid and (
+            selection is None or (self._task is not None and not self._task.done())
+        ):
             return
-        if self._task:
+        self._selection = None
+        self._latest = None
+        if self._task is not None:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
-        self._latest = None
-        self._run_id = run_id
-        self._task = (
-            asyncio.create_task(self._consume(venue, instrument)) if run_id and venue else None
-        )
+            self._task = None
+        if invalid:
+            raise ValueError("INVALID_TICKER_CONTEXT")
+        if selection is not None:
+            self._selection = selection
+            self._task = asyncio.create_task(self._consume(venue, instrument, source))
 
-    async def _consume(self, venue, instrument: str) -> None:
-        subscribe = venue.stream_ticks if isinstance(venue, Deriv) else venue.stream_ticker
+    async def _consume(self, venue, instrument: str, source: str) -> None:
+        subscribe = venue.stream_ticks if source == "DERIV_PUBLIC" else venue.stream_ticker
         while True:
             try:
                 async with aclosing(subscribe(instrument)) as feed:
                     async for row in feed:
+                        if not isinstance(row, dict):
+                            raise ValueError("INVALID_MARKET_TICK")
                         if row.get("status"):
                             self._latest = None
-                        elif row.get("price") is not None and row.get("instrument") == instrument:
-                            self._latest = {
-                                "price": str(row["price"]),
-                                "observed_at": int(row["observed_at"]),
-                                "source": row["source"],
-                            }
-            except (VenueError, ValueError, KeyError, OSError):
+                            continue
+                        if (
+                            row.get("instrument") != instrument or row.get("source") != source
+                            or type(row.get("observed_at")) is not int
+                            or row["observed_at"] < 0
+                        ):
+                            raise ValueError("INVALID_MARKET_TICK")
+                        price = candle_amount(row.get("price"))
+                        if price < ZERO or (source == "DERIV_PUBLIC" and price == ZERO) or (
+                            source == "KALSHI_DEMO" and price > 1
+                        ):
+                            raise ValueError("INVALID_MARKET_TICK")
+                        timestamp = row["observed_at"]
+                        if not 0 <= epoch() - timestamp <= BOOK_MAX_AGE or (
+                            self._latest is not None and timestamp < self._latest["observed_at"]
+                        ):
+                            self._latest = None
+                            continue
+                        self._latest = {"price": str(price), "observed_at": timestamp, "source": source}
+            except (VenueError, ValueError, KeyError, TypeError, OSError):
+                # Never propagate potentially private upstream details to a snapshot.
+                pass
+            finally:
+                # EOF, transport failure and cancellation invalidate cached marks.
                 self._latest = None
-            await asyncio.sleep(5)
+            await asyncio.sleep(TICKER_RETRY_SECONDS)
 
     def latest(self, run_id: str) -> dict | None:
-        if self._run_id == run_id and self._latest and 0 <= epoch() - self._latest["observed_at"] <= 15:
-            return self._latest
+        if (
+            self._selection is not None and self._selection[0] == run_id and self._latest
+            and 0 <= epoch() - self._latest["observed_at"] <= BOOK_MAX_AGE
+        ):
+            return dict(self._latest)
         return None

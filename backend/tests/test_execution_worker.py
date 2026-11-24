@@ -112,7 +112,7 @@ async def test_ticker_is_bound_to_run_and_discards_stale_marks():
     class DemoTicker(Deriv):
         async def stream_ticks(self, instrument):
             yield {"instrument": instrument, "price": Decimal("1.24"),
-                   "observed_at": epoch() - 60, "source": "MOCK"}
+                   "observed_at": epoch() - 60, "source": "DERIV_PUBLIC"}
             heard.set()
             await Event().wait()
 
