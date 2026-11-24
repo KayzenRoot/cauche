@@ -177,6 +177,7 @@ class Deriv:
                 while (
                     proposal_stream is not None
                     and response.get("msg_type") == "proposal"
+                    and response.get("error") is None
                     and isinstance(response.get("subscription"), dict)
                     and response["subscription"].get("id") == proposal_stream
                 ):
@@ -266,15 +267,21 @@ class Deriv:
         prices = array(history.get("prices"))
         if len(times) != len(prices):
             raise VenueError("INVALID_RESPONSE")
-        return [
-            {
+        rows = []
+        previous = -1
+        now = int(time.time())
+        for timestamp, price in zip(times, prices, strict=True):
+            observed_at, amount = number(timestamp), decimal(price)
+            if not max(0, previous) <= observed_at <= now or amount <= 0:
+                raise VenueError("INVALID_RESPONSE")
+            rows.append({
                 "instrument": instrument,
-                "observed_at": number(timestamp),
-                "price": decimal(price),
+                "observed_at": observed_at,
+                "price": amount,
                 "source": "DERIV_PUBLIC",
-            }
-            for timestamp, price in zip(times, prices, strict=True)
-        ]
+            })
+            previous = observed_at
+        return rows
 
     async def stream_ticks(self, instrument: str) -> AsyncIterator[dict]:
         """Read-only stream. Each retry begins with a fresh subscription."""
@@ -290,7 +297,7 @@ class Deriv:
                     delay = 1
                     while True:
                         message = await receive(websocket)
-                        if message.get("msg_type") != "tick":
+                        if message.get("msg_type") != "tick" or message.get("error") is not None:
                             raise VenueError("INVALID_RESPONSE")
                         yield _tick(symbol, message.get("tick"))
             except VenueError as exc:
@@ -609,10 +616,14 @@ def _tick(instrument: str, payload: Any) -> dict:
     raw = object_(payload)
     if raw.get("symbol") != instrument:
         raise VenueError("INVALID_RESPONSE")
+    observed_at = number(raw.get("epoch"))
+    price = decimal(raw.get("quote"))
+    if observed_at < 0 or price <= 0:
+        raise VenueError("INVALID_RESPONSE")
     return {
         "instrument": instrument,
-        "observed_at": number(raw.get("epoch")),
-        "price": decimal(raw.get("quote")),
+        "observed_at": observed_at,
+        "price": price,
         "bid": optional_decimal(raw.get("bid")),
         "ask": optional_decimal(raw.get("ask")),
         "source": "DERIV_PUBLIC",
