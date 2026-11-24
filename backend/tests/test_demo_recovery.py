@@ -14,10 +14,11 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 
 from app import demo_execution, worker
 from app.db import Base, utcnow
-from app.domain import Decision
+from app.domain import Book, Decision, Market
 from app.integrations import Deriv, Kalshi, VenueError
 from app.models import (
-    Bot, ExchangeConnection, Fee, Fill, Order, OrderIntent, Position, RiskConfig, Settlement, Signal,
+    BalanceSnapshot, Bot, ExchangeConnection, Fee, Fill, MarketSnapshot, Order, OrderIntent, Position,
+    RiskConfig, RiskViolation, Settlement, Signal,
     StrategyConfig, StrategyRun, SystemEvent,
 )
 
@@ -1142,3 +1143,153 @@ async def test_worker_changed_cursor_discards_observation(recovery_db, venue, mo
         bot = db.get(Bot, 1)
         assert bot.cursor == 1 and bot.last_error is None
         assert db.scalar(select(func.count()).select_from(OrderIntent)) == 0
+
+
+# CD-13: real worker orchestration with local ledger and simulated external I/O.
+def worker_market(*, source="KALSHI_OFFICIAL_DEMO_MARKET", instrument=MARKET, exchange="KALSHI"):
+    return Market(
+        exchange, instrument, "MOCK-EVENT", worker.epoch(), source,
+        book=Book(Decimal("0.39"), Decimal("0.40"), Decimal("20"), Decimal("20"),
+                  fee_schedule_verified=True),
+    )
+
+
+def configure_worker_market(monkeypatch, venue, market):
+    venue.verify_demo = AsyncMock(return_value={
+        "currency": "USD", "balance": Decimal("100"), "source": "KALSHI_DEMO", "environment": "BROKER_DEMO",
+    })
+    venue.positions = AsyncMock(return_value=[])
+    venue.open_orders = AsyncMock(return_value=[])
+    monkeypatch.setattr(worker, "observe", AsyncMock(return_value=market))
+
+
+@pytest.mark.parametrize("kind", ["exchange", "instrument", "source", "fixture-source"])
+async def test_worker_rejects_mismatched_market_before_persistence(recovery_db, venue, monkeypatch, kind):
+    if kind == "fixture-source":
+        with recovery_db.begin() as db:
+            bot = db.get(Bot, 1)
+            run = db.get(StrategyRun, bot.run_id)
+            bot.mode = run.mode = "REPLAY"
+        market = worker_market()
+    else:
+        market = worker_market(**{
+            kind: {"exchange": "DERIV", "instrument": "OTHER", "source": "SIMULATED_FIXTURE"}[kind],
+        })
+    configure_worker_market(monkeypatch, venue, market)
+    assert await worker.step() == worker.MARKET_TICK
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        bot = db.get(Bot, 1)
+        assert bot.cursor == 0 and bot.state == "ERROR" and bot.desired_state == "PAUSED"
+        assert db.scalar(select(func.count()).select_from(MarketSnapshot)) == 0
+        assert db.scalar(select(func.count()).select_from(BalanceSnapshot)) == 0
+        assert db.scalar(select(func.count()).select_from(OrderIntent)) == 0
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+async def test_worker_claim_pipeline_with_real_risk_and_mocked_submission(recovery_db, venue, monkeypatch, blocked):
+    with recovery_db.begin() as db:
+        bot = db.get(Bot, 1)
+        run = db.get(StrategyRun, bot.run_id)
+        bot.strategy = run.strategy = "KALSHI-STRAT-02"
+        db.add(StrategyConfig(id=bot.strategy))
+        db.get(RiskConfig, 1).thresholds = {"max_order_exposure": "0.10"} if blocked else {}
+    market = worker_market()
+    configure_worker_market(monkeypatch, venue, market)
+    # Replace only the strategy output. Real risk, persistence and dispatch remain in use.
+    decision = Decision(
+        strategy="KALSHI-STRAT-02", version="1", reason="TEST", side="YES", orderable=True,
+        price=Decimal("0.40"), quantity=Decimal("1"), exposure=Decimal("0.40"), payout=Decimal("1"),
+        source=market.source, timestamp=market.timestamp, instrument=market.instrument, event=market.event,
+    )
+    evaluate = Mock(return_value=decision)
+    monkeypatch.setattr(worker, "evaluate", evaluate)
+    ticker = Mock()
+    ticker.select = AsyncMock()
+    ticker.latest.return_value = None
+
+    async def submit(*_args, **kwargs):
+        # A separate database session sees the committed claim before the mocked write.
+        with recovery_db() as db:
+            intent = db.get(OrderIntent, kwargs["client_order_id"])
+            assert intent.status == "SUBMITTING"
+            assert intent.request["risk_thresholds"] == {}
+            assert db.get(Order, intent.id) is None
+        return {**recovered_ack(), "client_order_id": kwargs["client_order_id"]}
+
+    venue.submit_demo.side_effect = submit
+    assert await worker.step(ticker) == worker.MARKET_TICK
+    ticker.select.assert_awaited_once_with("run-current", venue, MARKET)
+    ticker.latest.assert_called_once_with("run-current")
+    assert evaluate.call_args.args[1].inventory == Decimal("0")
+    with recovery_db() as db:
+        bot = db.get(Bot, 1)
+        assert bot.cursor == 1 and bot.state == "RUNNING"
+        assert db.get(ExchangeConnection, "KALSHI").last_sync is not None
+        assert db.scalar(select(func.count()).select_from(MarketSnapshot)) == 1
+        assert db.scalar(select(BalanceSnapshot)).balance == Decimal("100")
+        if blocked:
+            assert db.scalar(select(RiskViolation)).code == "ORDER_EXPOSURE_LIMIT"
+            assert db.scalar(select(func.count()).select_from(OrderIntent)) == 0
+            assert db.scalar(select(func.count()).select_from(Order)) == 0
+        else:
+            intent = db.scalar(select(OrderIntent))
+            assert intent.status == "CONFIRMED"
+            assert db.get(Order, intent.id).status == "CANCELLED"
+            assert db.scalar(select(func.count()).select_from(Fill)) == 0
+    if blocked:
+        venue.submit_demo.assert_not_awaited()
+    else:
+        venue.submit_demo.assert_awaited_once()
+
+
+async def test_worker_paused_before_observation_clears_ticker(recovery_db, venue):
+    with recovery_db.begin() as db:
+        db.get(Bot, 1).desired_state = "PAUSED"
+    ticker = Mock()
+    ticker.select = AsyncMock()
+    assert await worker.step(ticker) == worker.MARKET_TICK
+    ticker.select.assert_awaited_once_with(None, None, MARKET)
+    worker.observe.assert_not_awaited()
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        assert db.get(Bot, 1).state == "PAUSED"
+
+
+async def test_worker_fixture_pause_during_observation_never_persists(recovery_db, venue, monkeypatch):
+    with recovery_db.begin() as db:
+        bot = db.get(Bot, 1)
+        run = db.get(StrategyRun, bot.run_id)
+        bot.mode = run.mode = "REPLAY"
+
+    async def pause(*_args, **_kwargs):
+        with recovery_db.begin() as db:
+            db.get(Bot, 1).desired_state = "PAUSED"
+        return worker_market(source="SIMULATED_FIXTURE")
+
+    monkeypatch.setattr(worker, "observe", AsyncMock(side_effect=pause))
+    assert await worker.step() == 1.0
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        bot = db.get(Bot, 1)
+        assert bot.cursor == 0 and bot.state == "PAUSED"
+        assert db.scalar(select(func.count()).select_from(MarketSnapshot)) == 0
+        assert db.scalar(select(func.count()).select_from(OrderIntent)) == 0
+
+
+async def test_worker_balance_discrepancy_prevents_new_claim(recovery_db, venue, monkeypatch):
+    market = worker_market()
+    configure_worker_market(monkeypatch, venue, market)
+    monkeypatch.setattr(worker, "evaluate", Mock(return_value=Decision(strategy=STRATEGY, version="1", reason="TEST")))
+    assert await worker.step() == worker.MARKET_TICK
+    venue.verify_demo.return_value["balance"] = Decimal("90")
+    worker.evaluate.reset_mock()
+    assert await worker.step() == worker.MARKET_TICK
+    worker.evaluate.assert_not_called()
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        bot = db.get(Bot, 1)
+        assert bot.state == "RISK_BLOCKED" and bot.desired_state == "PAUSED"
+        assert db.scalar(select(RiskViolation)).code == "BALANCE_DISCREPANCY"
+        assert db.scalar(select(func.count()).select_from(OrderIntent)) == 0
+        assert db.scalar(select(func.count()).select_from(BalanceSnapshot)) == 1

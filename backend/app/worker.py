@@ -263,6 +263,20 @@ async def step(ticker: MarketTicker | None = None) -> float:
                     raise ValueError("STALE_MARKET_DATA")
                 expire_replay(db, bot)
                 return 1.0
+            if fixture:
+                expected_source = "SIMULATED_FIXTURE"
+                expected_instrument = instrument.removeprefix("FIXTURE:")
+            else:
+                expected_source = (
+                    "DERIV_OFFICIAL_PUBLIC" if exchange == "DERIV" else
+                    "KALSHI_OFFICIAL_DEMO_MARKET" if mode == "BROKER_DEMO" else "KALSHI_OFFICIAL_PUBLIC"
+                )
+                expected_instrument = instrument
+            if (
+                market.exchange != exchange or market.instrument != expected_instrument
+                or market.source != expected_source
+            ):
+                raise ValueError("INVALID_MARKET_CONTEXT")
             save_market(db, bot, market, tick=ticker.latest(run_id) if ticker else None)
             if fixture or cursor == 0 or cursor % 6 == 0:
                 emit(db, bot, "MARKET", "MARKET_OBSERVED", "Market observation persisted",
