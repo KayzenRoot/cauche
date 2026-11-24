@@ -1,6 +1,7 @@
 """Compare a frozen, disposable source with its independently restored database."""
 import os
 import subprocess
+from pathlib import Path
 
 from sqlalchemy import MetaData, create_engine, select, text
 from sqlalchemy.engine import make_url
@@ -12,6 +13,13 @@ from app.security import decrypt_credentials, verify_password
 def require(condition, code):
     if not condition:
         raise SystemExit(code)
+
+
+def owner_password() -> str:
+    path = os.environ.get("CAUCHE_TEST_PASSWORD_FILE")
+    if path:
+        return Path(path).read_text(encoding="utf-8").strip()
+    return os.environ["CAUCHE_TEST_PASSWORD"]
 
 
 def snapshot(connection, metadata):
@@ -199,7 +207,7 @@ def main():
                 "SELECT email, password_hash, role FROM users WHERE id = 1"
             )).one()
             require(owner.email == "owner@example.test" and owner.role == "admin"
-                    and verify_password(owner.password_hash, os.environ["CAUCHE_TEST_PASSWORD"]),
+                    and verify_password(owner.password_hash, owner_password()),
                     "RESTORE_OWNER_AUTHENTICATION_FAILED")
             encrypted = recovered.execute(text(
                 "SELECT ciphertext FROM real_account_connections WHERE exchange = 'DERIV'"

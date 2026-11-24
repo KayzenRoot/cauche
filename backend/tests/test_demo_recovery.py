@@ -4,7 +4,9 @@ import asyncio
 from dataclasses import replace
 import os
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock
+from urllib.parse import quote
 from uuid import uuid4
 
 import pytest
@@ -41,9 +43,17 @@ def recovery_db(request, tmp_path, monkeypatch):
                 pytest.fail("PostgreSQL service is required in CI")
             pytest.skip("Set CAUCHE_TEST_POSTGRES_PORT for the isolated test service")
         assert port.isdecimal() and 0 < int(port) < 65536
+        password_file = os.environ.get("CAUCHE_TEST_POSTGRES_PASSWORD_FILE")
+        password = (
+            Path(password_file).read_text(encoding="utf-8").strip()
+            if password_file else os.environ.get("CAUCHE_TEST_POSTGRES_PASSWORD", "")
+        )
+        if os.environ.get("GITHUB_ACTIONS") == "true" and not password:
+            pytest.fail("PostgreSQL CI requires a generated password")
+        credentials = f"cauche_test:{quote(password, safe='')}" if password else "cauche_test"
         # Fixed loopback host/test-only database, never DATABASE_URL or production.
         engine = create_engine(
-            f"postgresql+psycopg://cauche_test@127.0.0.1:{int(port)}/cauche_test",
+            f"postgresql+psycopg://{credentials}@127.0.0.1:{int(port)}/cauche_test",
             connect_args={"connect_timeout": 5}, hide_parameters=True,
         )
         schema = "recovery_" + uuid4().hex

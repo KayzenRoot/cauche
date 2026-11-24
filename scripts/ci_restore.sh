@@ -6,12 +6,22 @@ if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_ENVIRONMENT:-}" != github-hoste
   exit 2
 fi
 umask 077
+compose() {
+  if [[ -n "${CAUCHE_COMPOSE_ENV_FILE:-}" ]]; then
+    docker compose --env-file "$CAUCHE_COMPOSE_ENV_FILE" "$@"
+  else
+    docker compose "$@"
+  fi
+}
 dump="$(mktemp)"
 trap 'rm -f -- "$dump"' EXIT
 # Freeze all writers; never restore into the source database.
-docker compose stop web api worker
-docker compose exec -T db pg_dump -U cauche -d cauche -Fc --no-owner --no-privileges > "$dump"
+compose stop web api worker
+compose exec -T db pg_dump -U cauche -d cauche -Fc --no-owner --no-privileges > "$dump"
 test -s "$dump"
-docker compose exec -T db createdb -U cauche cauche_restore_ci
-docker compose exec -T db pg_restore --exit-on-error --no-owner --no-privileges -U cauche -d cauche_restore_ci < "$dump"
-docker compose run --rm --no-deps -T -e CAUCHE_TEST_PASSWORD api python - < scripts/ci_restore_check.py
+compose exec -T db createdb -U cauche cauche_restore_ci
+compose exec -T db pg_restore --exit-on-error --no-owner --no-privileges -U cauche -d cauche_restore_ci < "$dump"
+compose run --rm --no-deps -T \
+  -v "${CAUCHE_TEST_PASSWORD_FILE:?Set CAUCHE_TEST_PASSWORD_FILE}:/tmp/owner-password:ro" \
+  -e CAUCHE_TEST_PASSWORD_FILE=/tmp/owner-password \
+  api python - < scripts/ci_restore_check.py

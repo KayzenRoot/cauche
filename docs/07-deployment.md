@@ -25,3 +25,13 @@ Sign in and open Administration → Connections. Save the Deriv PAT, registered 
 - For an update, save a backup, stop strategy execution, verify pending broker orders and reconcile ambiguous submissions. Run `docker compose down`, then rebuild and start. Preserve the volume. Automated startup performs Alembic upgrades.
 - For safe shutdown, halt execution and confirm open positions or managed expirations in the broker sandbox. Run `docker compose stop`. Keep PostgreSQL state for restart. A Deriv contract can settle while services are offline, so review its subsequent reconciliation.
 - If a Deriv acknowledgement is lost, verify the demo account manually. The worker retains the unknown claim and refuses duplicate dispatch. Reconciliation of an ambiguous unidentifiable Deriv purchase requires operator review.
+
+## CI PostgreSQL authentication
+
+The backend CI job starts a disposable PostgreSQL container bound to `127.0.0.1` on a random port. Each run generates a random password, masks it in logs, writes it to a protected temporary file, and configures `scram-sha-256` host authentication. The job verifies that the correct password succeeds and that missing or wrong passwords fail, then removes the container, its volume and the temporary secret files. The Compose integration job uses a separate random database password and a protected temporary environment file; secrets are not persisted in `GITHUB_ENV`.
+
+## Key custody and backup limitations
+
+- The DPAPI master-key escrow is bound to the current Windows user profile. It does not provide cross-device recovery without an explicit export and recovery procedure. Keep an additional passphrase-protected copy off-device if recovery from another device is required.
+- The automated backup timer writes encrypted dumps on the host. It does not replicate them off-host by itself; refresh an off-host copy with a separate process. The backup key is stored separately from the ciphertext, and losing it makes the encrypted backups unrecoverable.
+- The CA private key is protected by the local user ACL and is not stored on the VPS. Back it up separately and never commit it.

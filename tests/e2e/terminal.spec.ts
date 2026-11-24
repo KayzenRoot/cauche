@@ -1,11 +1,14 @@
 import { expect, test, type Page } from '@playwright/test';
+import { readFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 
 const email = process.env.CAUCHE_TEST_EMAIL ?? 'owner@example.test';
-const password = process.env.CAUCHE_TEST_PASSWORD;
+const password = process.env.CAUCHE_TEST_PASSWORD_FILE
+  ? readFileSync(process.env.CAUCHE_TEST_PASSWORD_FILE, 'utf8').trim()
+  : process.env.CAUCHE_TEST_PASSWORD;
 
 async function login(page: Page) {
-  if (!password) throw new Error('Set CAUCHE_TEST_PASSWORD for the ephemeral test owner');
+  if (!password) throw new Error('Set CAUCHE_TEST_PASSWORD_FILE or CAUCHE_TEST_PASSWORD for the ephemeral test owner');
   await page.goto('/');
   await page.getByLabel('E-mail').fill(email);
   await page.getByLabel('Senha', { exact: true }).fill(password);
