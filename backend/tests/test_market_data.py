@@ -67,7 +67,10 @@ def test_conflicting_closed_duplicates_fail_in_both_orders(overrides):
 def deriv(monkeypatch):
     adapter = Mock()
     adapter.candles = AsyncMock(side_effect=[[bar(NOW - 300)], [bar(NOW - 900)]])
-    adapter.quote = AsyncMock(return_value={"currency": "USD", "stake": D("1"), "payout": D("1.85")})
+    adapter.quote = AsyncMock(return_value={
+        "currency": "USD", "stake": D("1"), "payout": D("1.85"),
+        "observed_at": NOW, "spot": D("1.11"), "expires_at": NOW + 300,
+    })
     constructor = Mock(return_value=adapter)
     monkeypatch.setattr(market, "Deriv", constructor)
     monkeypatch.setattr(market, "epoch", lambda: NOW)
@@ -115,9 +118,9 @@ async def test_deriv_freshness_boundary_and_confirmation_no_lookahead(deriv):
         [bar(NOW - 1815), bar(NOW - 900)],
     ]
     result = await market.deriv_observation("EUR/USD", {"stake": "1", "duration_seconds": 300})
-    assert result.timestamp == NOW - 315
+    assert result.timestamp == NOW and result.candles[-1].time == NOW - 315
     assert [c.time for c in result.confirmation] == [NOW - 915]
-    assert all(c.time <= result.timestamp for c in result.confirmation)
+    assert all(c.time <= result.candles[-1].time for c in result.confirmation)
 
 
 @pytest.mark.parametrize("duration", [30, 61])
@@ -387,3 +390,16 @@ async def test_scanner_discards_relation_when_final_snapshot_incompatible(kalshi
     assert value.relation is None and value.rules_id == ""
     if kind in {"no-primary-depth", "market-closed"}:
         assert value.book is None
+
+
+@pytest.mark.parametrize("overrides", [
+    {"observed_at": None}, {"observed_at": True}, {"observed_at": str(NOW)},
+    {"observed_at": NOW - 11}, {"observed_at": NOW + 1}, {"spot": "NaN"},
+    {"spot": "0"}, {"expires_at": True}, {"expires_at": NOW}, {"stake": True},
+])
+async def test_deriv_quote_requires_valid_fresh_evidence(deriv, overrides):
+    adapter, _ = deriv
+    adapter.quote.return_value.update(overrides)
+    result = await market.deriv_observation("EUR/USD", {"stake": "1", "duration_seconds": 300})
+    assert result.contracts == ()
+    assert adapter.quote.await_count == 2

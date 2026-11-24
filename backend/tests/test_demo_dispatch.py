@@ -29,6 +29,8 @@ def context(monkeypatch):
             side="CALL" if exchange == "DERIV" else "YES", orderable=True,
             price=Decimal("1") if exchange == "DERIV" else Decimal("0.40"),
             quantity=Decimal("1"), duration_seconds=300,
+            exposure=Decimal("1") if exchange == "DERIV" else Decimal("0.40"),
+            payout=Decimal("1.80") if exchange == "DERIV" else Decimal("1"),
         )
         risk = SimpleNamespace(kill_switch=False, thresholds={"min_payout_ratio": "1.40"})
         config = SimpleNamespace(enabled=True)
@@ -36,7 +38,8 @@ def context(monkeypatch):
         intent = SimpleNamespace(
             **fields, id="intent-fixture", timestamp=NOW, status="SUBMITTING",
             risk={"allowed": True}, request={"decision": decision.as_dict(),
-                                             "risk_thresholds": dict(risk.thresholds)}, response={},
+                                             "risk_thresholds": dict(risk.thresholds),
+                                             "expectancy": {"conservative_net_ev": "0.10"}}, response={},
         )
         records = {RiskConfig: risk, StrategyConfig: config, ExchangeConnection: connection}
         db = Mock()
@@ -117,7 +120,7 @@ async def test_eligible_claim_sends_once_with_intent_identity(context, exchange,
     if exchange == "DERIV":
         c.venue.submit_demo.assert_awaited_once_with(
             "frxEURUSD", "CALL", Decimal("1"), duration=5,
-            client_order_id=c.intent.id, min_payout_ratio=Decimal("1.40"),
+            client_order_id=c.intent.id, min_payout_ratio=Decimal("1.80"),
         )
     else:
         c.venue.submit_demo.assert_awaited_once_with(
@@ -134,7 +137,10 @@ async def test_adapter_failure_does_not_retry_or_create_order(context, exchange,
     c.venue.submit_demo.side_effect = VenueError("MOCK_FAILURE", outcome_unknown=unknown)
     await execution.dispatch(c.db, c.bot, c.intent)
     assert c.intent.status == ("UNKNOWN" if unknown else "REJECTED")
-    assert c.intent.response == {"code": "MOCK_FAILURE", "outcome_unknown": unknown}
+    assert c.intent.response == {
+        "submitted_at": execution.jsonable(NOW), "source": execution.BROKER_SOURCE,
+        "code": "MOCK_FAILURE", "outcome_unknown": unknown, "failed_at": execution.jsonable(NOW),
+    }
     assert c.bot.desired_state == ("PAUSED" if unknown else "RUNNING")
     assert c.bot.state == ("RISK_BLOCKED" if unknown else "RUNNING")
     c.venue.submit_demo.assert_awaited_once()
@@ -150,3 +156,18 @@ async def test_invalid_ack_leaves_claim_for_recovery(context):
     assert c.intent.status == "SUBMITTING"
     c.venue.submit_demo.assert_awaited_once()
     c.acknowledge.assert_called_once()
+
+
+@pytest.mark.parametrize("evidence", [None, {}, [], {"conservative_net_ev": None},
+    {"conservative_net_ev": "0"}, {"conservative_net_ev": "-0.01"},
+    {"conservative_net_ev": "NaN"}, {"conservative_net_ev": "Infinity"},
+    {"conservative_net_ev": "invalid"}, {"conservative_net_ev": True},
+    {"conservative_net_ev": 0.1}])
+async def test_unproven_expectancy_never_dispatches(context, evidence):
+    c = context()
+    c.intent.request["expectancy"] = evidence
+    await execution.dispatch(c.db, c.bot, c.intent)
+    assert c.intent.status == "CANCELLED"
+    c.factory.assert_not_called()
+    c.venue.submit_demo.assert_not_awaited()
+    c.acknowledge.assert_not_called()

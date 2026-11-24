@@ -246,6 +246,7 @@ def test_deriv_ack_evidence_uses_official_purchase_timestamp_and_costs(db_factor
         acknowledge(db, intent, {
             "broker_id": "TEST-BROKER-1", "status": "OPEN", "currency": "USD",
             "price": "3.98", "payout": "8.10", "fee": "0.02", "observed_at": observed,
+            "quantity": "1", "source": "DERIV_DEMO", "client_order_id": intent.id,
         })
         data = research_evidence(db, Filters(mode="BROKER_DEMO", exchange="DERIV"), 1)
         observation = data["items"][0]["execution"]

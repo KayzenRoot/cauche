@@ -45,8 +45,15 @@ def count(db, model):
     return db.scalar(select(func.count()).select_from(model))
 
 
+def record_fixture(db, bot, market, decision):
+    gated, expectancy = execution.entry_gate(decision, market)
+    return execution.record_decision(
+        db, bot, market, gated, 1, parameters={}, expectancy=expectancy,
+    )
+
+
 def pending(db, bot, market, decision):
-    signal = execution.record_decision(db, bot, market, decision, 1)
+    signal = record_fixture(db, bot, market, decision)
     assert signal is not None
     risk = check_risk(decision, market)
     assert risk.allowed
@@ -95,8 +102,8 @@ def test_unmatched_event_is_not_marked_as_known_pnl(ledger):
 
 def test_duplicate_signal_is_not_persisted_twice(ledger):
     db, bot, market, decision = ledger
-    assert execution.record_decision(db, bot, market, decision, 1) is not None
-    assert execution.record_decision(db, bot, market, decision, 1) is None
+    assert record_fixture(db, bot, market, decision) is not None
+    assert record_fixture(db, bot, market, decision) is None
     assert count(db, Signal) == 1
 
 
@@ -131,7 +138,7 @@ def test_probability_calibration_ignores_unrelated_event(ledger):
     db, bot, market, decision = ledger
     forecast = Forecast(D("0.75"), D("0.1"), NOW - 1, NOW + 300,
                         "simulated-ensemble", "fixture", "fixture-rules")
-    execution.record_decision(db, bot, market, replace(decision, forecast=forecast), 1)
+    record_fixture(db, bot, market, replace(decision, forecast=forecast))
     execution.settle_simulation(db, bot, replace(market, event="OTHER", outcome=True))
     estimate = db.scalars(select(ProbabilityEstimate)).one()
     assert estimate.outcome is None and estimate.brier_score is None

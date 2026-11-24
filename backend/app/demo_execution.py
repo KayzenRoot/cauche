@@ -178,6 +178,19 @@ def acknowledge(db: Session, intent: OrderIntent, result: dict) -> Order:
     return order
 
 
+def positive_expectancy(request: dict) -> bool:
+    evidence = request.get("expectancy")
+    if not isinstance(evidence, dict):
+        return False
+    value = evidence.get("conservative_net_ev")
+    if isinstance(value, bool) or not isinstance(value, (str, int, Decimal)):
+        return False
+    try:
+        return decimal(value) > ZERO
+    except ValueError:
+        return False
+
+
 async def dispatch(db: Session, bot: Bot, intent: OrderIntent) -> None:
     # Only a newly claimed intent may be dispatched by the worker. Other
     # states (in particular UNKNOWN) must never be rewritten or resubmitted.
@@ -194,7 +207,7 @@ async def dispatch(db: Session, bot: Bot, intent: OrderIntent) -> None:
         != (intent.run_id, intent.exchange, intent.strategy, intent.instrument)
         or intent.exchange not in {"DERIV", "KALSHI"}
         or intent.risk.get("allowed") is not True
-        or amount((intent.request.get("expectancy") or {}).get("conservative_net_ev")) <= ZERO
+        or not positive_expectancy(intent.request)
         or not risk or risk.kill_switch or risk.thresholds != intent.request.get("risk_thresholds")
         or not config or not config.enabled
         or not connection or not connection.enabled or not connection.ciphertext

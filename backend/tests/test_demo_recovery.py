@@ -1,6 +1,7 @@
 """CD-04: real transaction boundaries, no broker network or credentials."""
 
 import asyncio
+from dataclasses import replace
 import os
 from decimal import Decimal
 from unittest.mock import AsyncMock, Mock
@@ -16,6 +17,7 @@ from app import demo_execution, worker
 from app.db import Base, utcnow
 from app.domain import Book, Candle, Decision, Market
 from app.integrations import Deriv, Kalshi, VenueError
+from app.quant.types import Forecast
 from app.models import (
     BalanceSnapshot, Bot, ExchangeConnection, Fee, Fill, MarketSnapshot, Order, OrderIntent, Position,
     RiskConfig, RiskViolation, Settlement, Signal,
@@ -81,7 +83,8 @@ def seed_claim(factory, *, run_id="run-current", status="SUBMITTING"):
         db.flush()
         db.add(OrderIntent(id="claim-fixture", signal_id="signal-fixture", status=status,
                            risk={"allowed": True},
-                           request={"decision": decision.as_dict(), "risk_thresholds": {}}, **fields))
+                           request={"decision": decision.as_dict(), "risk_thresholds": {},
+                                    "expectancy": {"conservative_net_ev": "0.10"}}, **fields))
 
 
 def recovered_ack():
@@ -223,6 +226,7 @@ async def test_deriv_settlement_ledger_exact_and_idempotent(recovery_db, invalid
             "source": "DERIV_DEMO", "client_order_id": intent.id, "broker_id": "123",
             "status": "OPEN", "currency": "USD", "price": Decimal("1"),
             "quantity": Decimal("1"), "fee": Decimal("0.10"),
+            "observed_at": int(now.timestamp()),
         })
     when = int(now.timestamp()) + 300
     result = dict(broker_id="123", source="DERIV_DEMO", currency="USD", status="SETTLED",
@@ -818,6 +822,7 @@ async def test_reconciliation_valid_deriv_route_is_read_only(recovery_db):
         demo_execution.acknowledge(db, intent, {
             "source": "DERIV_DEMO", "client_order_id": intent.id, "broker_id": "123",
             "status": "OPEN", "currency": "USD", "price": Decimal("1"), "quantity": Decimal("1"),
+            "observed_at": int(fields["timestamp"].timestamp()),
         })
     venue = Mock(spec=Deriv)
     venue.reconcile_demo = AsyncMock(return_value={
@@ -1195,12 +1200,17 @@ async def test_worker_claim_pipeline_with_real_risk_and_mocked_submission(recove
         db.add(StrategyConfig(id=bot.strategy))
         db.get(RiskConfig, 1).thresholds = {"max_order_exposure": "0.10"} if blocked else {}
     market = worker_market()
+    # Synthetic independent forecast at the mocked market boundary; no live service.
+    forecast = Forecast(Decimal("0.80"), Decimal("0.05"), market.timestamp - 1,
+                        market.timestamp + 300, "noaa-nbm", "fixture", "fixture-rules")
+    market = replace(market, rules_id=forecast.rules_id, forecast=forecast)
     configure_worker_market(monkeypatch, venue, market)
     # Replace only the strategy output. Real risk, persistence and dispatch remain in use.
     decision = Decision(
         strategy="KALSHI-STRAT-02", version="1", reason="TEST", side="YES", orderable=True,
         price=Decimal("0.40"), quantity=Decimal("1"), exposure=Decimal("0.40"), payout=Decimal("1"),
         source=market.source, timestamp=market.timestamp, instrument=market.instrument, event=market.event,
+        forecast=forecast,
     )
     evaluate = Mock(return_value=decision)
     monkeypatch.setattr(worker, "evaluate", evaluate)

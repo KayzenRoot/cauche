@@ -91,16 +91,23 @@ async def deriv_observation(instrument: str, parameters: dict) -> Market:
         for side in ("CALL", "PUT"):
             try:
                 quote = await venue.quote(native, side, stake, duration=duration // 60)
-                if quote.get("currency", "USD") == "USD":
-                    expiry = quote.get("expires_at")
-                    quotes.append(DerivQuote(
-                        side, Decimal(str(quote["stake"])), Decimal(str(quote["payout"])), duration,
-                        observed_at=int(quote["observed_at"]),
-                        spot=Decimal(str(quote["spot"])),
-                        expires_at=int(expiry) if expiry is not None else None,
-                    ))
-            except VenueError:
-                # A verified absence of a price or contract leaves the product unorderable.
+                if not isinstance(quote, dict) or quote.get("currency") != "USD":
+                    continue
+                timestamp, expiry = quote.get("observed_at"), quote.get("expires_at")
+                if (type(timestamp) is not int or timestamp <= 0
+                        or (expiry is not None and (type(expiry) is not int or expiry <= timestamp))):
+                    continue
+                quoted_stake = candle_amount(quote.get("stake"))
+                payout = candle_amount(quote.get("payout"))
+                spot = candle_amount(quote.get("spot"))
+                if min(quoted_stake, payout, spot) <= ZERO or quoted_stake != stake:
+                    continue
+                quotes.append(DerivQuote(
+                    side, quoted_stake, payout, duration,
+                    observed_at=timestamp, spot=spot, expires_at=expiry,
+                ))
+            except (VenueError, ValueError):
+                # Missing or malformed evidence leaves the product unorderable.
                 continue
     # Quote reads take time too: do not publish an observation that expired
     # while waiting for them, or accept a backward clock jump.
@@ -111,7 +118,8 @@ async def deriv_observation(instrument: str, parameters: dict) -> Market:
         "DERIV", instrument, native, observed_at, "DERIV_OFFICIAL_PUBLIC",
         bars, confirmation,
         contracts=tuple(quote for quote in quotes
-                        if quote.observed_at is not None and 0 <= observed_at - quote.observed_at <= 10),
+                        if quote.observed_at is not None and 0 <= observed_at - quote.observed_at <= 10
+                        and (quote.expires_at is None or observed_at < quote.expires_at)),
     )
 
 

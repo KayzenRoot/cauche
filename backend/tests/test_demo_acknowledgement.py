@@ -43,6 +43,7 @@ def normalized_ack(exchange, status="OPEN"):
             "broker_id": "123", "status": status, "currency": "USD",
             "price": Decimal("1"), "quantity": Decimal("1"),
             "source": "DERIV_DEMO", "client_order_id": intent.id,
+            "observed_at": 1800000000,
         }
     filled, remaining = {
         "OPEN": ("0", "1"), "ACCEPTED": ("0", "1"), "PARTIAL": ("0.25", "0.75"),
@@ -251,6 +252,20 @@ def test_deriv_acknowledgement_rejects_non_usd(boundary, currency):
     payload = normalized_ack("DERIV")
     payload["currency"] = currency
     with pytest.raises(ValueError, match="UNSUPPORTED_CURRENCY"):
+        execution.acknowledge(db, intent, payload)
+    assert intent.status == "SUBMITTING" and intent.response == {}
+    create.assert_not_called()
+    fill.assert_not_called()
+    emit.assert_not_called()
+
+
+@pytest.mark.parametrize("value", [None, True, 0, -1, "1800000000"])
+def test_deriv_ack_requires_official_timestamp(boundary, value):
+    db, _, create, fill, emit = boundary
+    intent = intent_for("DERIV")
+    payload = normalized_ack("DERIV")
+    payload["observed_at"] = value
+    with pytest.raises(ValueError, match="INVALID_BROKER_CONFIRMATION_TIME"):
         execution.acknowledge(db, intent, payload)
     assert intent.status == "SUBMITTING" and intent.response == {}
     create.assert_not_called()
