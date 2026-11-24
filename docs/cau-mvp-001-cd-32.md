@@ -1,0 +1,10 @@
+# CAU-MVP-001/CD-32 - cobertura residual de simulação
+
+Status PROPOSED / NOT PROMOTED. HIGH_ASSURANCE. CD-31 APPROVED no comentário 7140613218; push 45458307921 e PR 45458318503: 1321 Python, 4 E2E por CI, commands 143/143, backend 4142/4395; dez módulos prioritários a 100%.
+
+## Context Lock
+Base 9f9ad45a24414b9cf9de04437688cef2dbda930b; main a8e69195192a0abda82298927f0b0f231a86ea7b; PR #2 7e6faee7c00cfd65628379576011e51f54a5ff8d. Fingerprints conferidos: checkpoint b2f0247d36514b625b203cecf587432a957b2a66; ledger 2db4cb6daa284c8bffce82cdfca1a4efe8ea4ce4; scope 7084e1c86918b7716c023dc947c7a24efa28ce8a; DoD 6e73ebfa3a385fc7e49ff56f372856f84537ff15; architecture d536ac3f1ba924ef80299e6569d8b0ab25eff78d; requirements 4c8e80e8aa65cacc8040ec0dd96a46e385556c34; simulation.py 5c3120b73825e1f44a09686bc7d0e26df2cb9a49; types.py e800505bbebf9bcb460e623f4e137041772a1800; test_quant_core.py 1d1a14ae7ab0133a2ca8066bb2bd0e97970d5aed.
+
+## Work Order
+NECESSARY: cobrir 11 instruções residuais de app/quant/simulation.py (56,74,77,79,82,100,102,144,148,153,164) com testes de custos inválidos, cotação/candle, entrada, granularidade, vencimento, book, taxas, identidade, temporalidade e liquidação; controles positivos de precisão Decimal. Ler fontes canônicas, simulation.py, types.py, testes quantitativos existentes. Somente testes/documentação; fixtures determinísticas sem rede, credenciais ou operações financeiras; não modificar algoritmos, dependências, CI, exclusões, PR #2 ou checkpoint.
+Proof obligations: 27 casos previstos, 1348 Python previstos; simulation 90/90 e backend 4153/4395 se comprovados; preservar dez módulos prioritários a 100%, ambos CIs integrais, 4 E2E por CI, SQLite/PostgreSQL, segurança, lint/typecheck/build. Entregáveis testes, WO, commit/push, Evidence Bundle pt-BR. NOT_TESTED até CI; não avançar com falha ou evidência incompleta. Fora de escopo: revisão independente, aceitação oficial e demais módulos. Sem merge, deploy, despesas ou operações financeiras; rollback via revert explícito, sem force-push.

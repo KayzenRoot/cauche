@@ -1,0 +1,13 @@
+# CAU-MVP-001/CD-20 - fronteira RPC e dados públicos Deriv
+
+Status PROPOSED / NOT PROMOTED. HIGH_ASSURANCE. F01/#3, F04/#6 e F06/#8 parciais. CD-19 APPROVED comentário 7138683973, CIs 45443947332/45443969005: 864 Python + 4 E2E, common 138/138, demo_execution 353/353, worker 283/283, market_data 216/216, Deriv 194/278, backend 3715/4252.
+
+## Context Lock
+Base 3255c3bc9a4f79bc6e4fdc24a9f3b8574c8b445f; main a8e69195192a0abda82298927f0b0f231a86ea7b; PR #2 head 7e6faee7c00cfd65628379576011e51f54a5ff8d.
+Fingerprints: checkpoint b2f0247d36514b625b203cecf587432a957b2a66; ledger 2db4cb6daa284c8bffce82cdfca1a4efe8ea4ce4; scope 7084e1c86918b7716c023dc947c7a24efa28ce8a; DoD 6e73ebfa3a385fc7e49ff56f372856f84537ff15; architecture d536ac3f1ba924ef80299e6569d8b0ab25eff78d; requirements 4c8e80e8aa65cacc8040ec0dd96a46e385556c34.
+
+## Work Order
+NECESSARY: não descartar erro em mensagem intercalada de proposta; rejeitar erro explícito em tick de stream; validar ticks históricos com timestamps inteiros não negativos/não futuros/não regressivos e preços positivos exatos; manter múltiplos ticks no mesmo segundo, sem sintetizar lacunas. Rejeitar preço não positivo/epoch negativo na normalização de stream. Ler adapter Deriv, common, contratos existentes e fontes canônicas. Arquivos: backend/app/integrations/deriv.py, backend/tests/test_deriv_transport.py, este documento. Clock local para histórico: política conservadora; não certifica sincronização oficial. Não alterar destinations, autenticação, operações, risk engine, schema, dependências, permissões, CI ou PR #2. Sem rede, credenciais reais, daemon ou operação financeira; RPC genérico de fixture, sockets locais. Fora de escopo: confirmação de compra/liquidação/statement, Kalshi, autenticidade remota, produção.
+Proof obligations: 20 erros RPC (read/mutation genérica simulada), 2 correlação/proposta, 1 markets/contracts, 3 ranges candles, 2 ranges ticks, 1 histórico válido, 8 inválidos, 6 primeiro tick inválido, 3 update inválido, 1 reconexão: 47 novos casos previstos, 911 Python. Validar CI completo, SQLite/PostgreSQL, segurança, E2E, cobertura incremental Deriv e preservação dos quatro módulos 100%, sem exclusão artificial. Não prometer 100% Deriv neste delta. Evidence Bundle final pt-BR, auditoria. Stop: CI incompleto/falha/risco relevante; sem outro delta, merge, deploy, despesas, operação financeira ou checkpoint. Rollback por revert explícito sem force-push.
+## Evidence Bundle preliminar
+NOT_TESTED até logs do SHA resultante. Não certifica stream oficial, continuidade, clock da bolsa, contratos financeiros restantes, revisão independente ou branches/frontend. Checkpoint não promovido.

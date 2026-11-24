@@ -1,0 +1,10 @@
+# CAU-MVP-001/CD-28 - segurança: cobertura residual
+
+Status PROPOSED / NOT PROMOTED. HIGH_ASSURANCE. CD-27 APPROVED no comentário 7140114374; push 45455040563 e PR 45455055899: 1241 Python, 4 E2E por CI, Kalshi 563/563, backend 4077/4395, seis módulos críticos em 100%.
+
+## Context Lock
+Base 07d679f28796ae24e6aafbd145444d1bcca35dee; main a8e69195192a0abda82298927f0b0f231a86ea7b; PR #2 7e6faee7c00cfd65628379576011e51f54a5ff8d. Fingerprints conferidos no base: checkpoint b2f0247d36514b625b203cecf587432a957b2a66; ledger 2db4cb6daa284c8bffce82cdfca1a4efe8ea4ce4; scope 7084e1c86918b7716c023dc947c7a24efa28ce8a; DoD 6e73ebfa3a385fc7e49ff56f372856f84537ff15; architecture d536ac3f1ba924ef80299e6569d8b0ab25eff78d; requirements 4c8e80e8aa65cacc8040ec0dd96a46e385556c34; security.py 0e0b1e0d2fbfe16d8a65b6362653584fc2001105; test_api_security.py 64e9c28d6bb30c421ccf26487b010066898d321f.
+
+## Work Order
+NECESSARY: cobrir 8 instruções faltantes de app/security.py (66-67, 78, 80-81, 101, 142, 157), priorizando chave ausente/inválida, payload autenticado com estrutura ou conteúdo inválido, ciphertext inválido/chave divergente, sessão inexistente, janela de throttle expirada e rehash Argon2id após login válido. Ler fontes canônicas, security.py, db.py e testes de API. Somente testes e documentação, usando fixture SQLite isolada, TestClient e chaves Fernet efêmeras. Não alterar algoritmo, parâmetros de produção, credenciais, escopo, execução financeira, dependências, CI, cobertura ou PR #2. Fora de escopo: outras lacunas, branches, auditoria independente, aceitação oficial, deploy e promoção.
+Proof obligations: 11 casos previstos, 1252 Python previstos; security 122/122 se comprovado, backend 4085/4395 se todas as lacunas fecharem; preservar seis módulos a 100%, 4 E2E por CI, segurança, SQLite/PostgreSQL, lint/typecheck/build, sem regressão ou exclusões artificiais. Entregáveis teste, WO, commit/push e Evidence Bundle pt-BR. Status NOT_TESTED até CI; parar se falha/incompleto. Nenhum merge, deploy, despesa ou operação financeira. Rollback via revert explícito; sem force-push.

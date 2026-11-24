@@ -1,0 +1,13 @@
+# CAU-MVP-001/CD-16 - integridade de book e scanner Kalshi
+
+Status PROPOSED / NOT PROMOTED. HIGH_ASSURANCE; F06/#8 parcial. CD-15 APPROVED no comentário 7138224213, CI 45440846561: 643 Python + 4 E2E; market_data 107/145, worker 283/283 e demo_execution 353/353.
+
+## Context Lock
+Base 21581657ef08ec093474d40dd99d7aa9cf3a49ec; main a8e69195192a0abda82298927f0b0f231a86ea7b; PR #2 head 7e6faee7c00cfd65628379576011e51f54a5ff8d.
+Fingerprints: checkpoint b2f0247d36514b625b203cecf587432a957b2a66; ledger 2db4cb6daa284c8bffce82cdfca1a4efe8ea4ce4; scope 7084e1c86918b7716c023dc947c7a24efa28ce8a; DoD 6e73ebfa3a385fc7e49ff56f372856f84537ff15; architecture d536ac3f1ba924ef80299e6569d8b0ab25eff78d; requirements 4c8e80e8aa65cacc8040ec0dd96a46e385556c34.
+
+## Work Order
+Objetivo NECESSARY: validar livro normalizado, preços/volume/taxas exatos e elegibilidade; vincular meta e book ao instrumento/evento/source esperado; exigir timestamp local de leitura com idade 0..15s, revalidado após consultas; não habilitar profundidade se mercado encerrado/liquidado; impedir lookahead de candles e pares; atualizar livro principal mesmo após falha de descoberta de pares, propagando falha da atualização em vez de reutilizar livro antigo. Manter contrato de fee_schedule_verified, ausência de book em grade não suportada, fonte pública/demo e filtros de relações do adapter. Ler market_data, quant/types, quant/strategies, adapter Kalshi market/orderbook/exclusive_siblings, testes e fontes canônicas. Arquivos: backend/app/market_data.py, backend/tests/test_market_data.py, este documento. Limite local de 15s adotado por consistência com ticker; não confundir timestamp local com timestamp da bolsa. Sem alterações de estratégia, adapters, schema, dependências, credenciais, permissões, endpoints ou testes existentes. Fora de escopo: streaming, continuidade histórica, verificação oficial, execução financeira, PR #2 e produção.
+Proof obligations: casos unitários com adapters mockados para envelopes, decimais e livros inválidos, origem/identidade, freshness, mercado encerrado, scanner válido/inválido e atualização obrigatória do principal. CI completo, regressão nos dois bancos e E2E, preservar 100% statements nos módulos críticos, sem exclusões artificiais. Não prometer 100% market_data neste delta; ticker residual segue necessário. Evidence Bundle final e auditoria pt-BR. Stop: CI incompleto/falha/risco relevante, sem outro delta, merge, deploy, despesas, operação financeira ou checkpoint. Rollback via revert explícito sem force-push.
+## Evidence Bundle preliminar
+NOT_TESTED até CI do novo SHA. F06 aberta; autenticidade remota, tarifas oficiais, latência, continuidade e revisão independente pendentes. Checkpoint não promovido.

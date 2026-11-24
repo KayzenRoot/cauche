@@ -1,0 +1,13 @@
+# CAU-MVP-001/CD-14 — cobertura residual e ticker órfão do worker
+
+Status PROPOSED / NOT PROMOTED. HIGH_ASSURANCE; F02/#4 e F06/#8 parciais. CD-13 APPROVED no comentário 7138030042; CI 45439381876: 586 Python + 4 E2E, demo_execution 100% (353/353), worker 273/277 (quatro miss), backend 3501/4140 statements.
+
+## Context Lock
+Main a8e69195192a0abda82298927f0b0f231a86ea7b; base CD 8707a6beee31655c82ad6616b9e8c353c635732b; PR #2 head 7e6faee7c00cfd65628379576011e51f54a5ff8d preservado.
+Fingerprints: checkpoint b2f0247d36514b625b203cecf587432a957b2a66; ledger 2db4cb6daa284c8bffce82cdfca1a4efe8ea4ce4; scope 7084e1c86918b7716c023dc947c7a24efa28ce8a; DoD 6e73ebfa3a385fc7e49ff56f372856f84537ff15; architecture d536ac3f1ba924ef80299e6569d8b0ab25eff78d; requirements 4c8e80e8aa65cacc8040ec0dd96a46e385556c34.
+
+## Work Order
+Objetivo NECESSARY: cobrir instruções residuais 180, 214-215 e 397 no base do worker; corrigir assinatura de mercado órfã quando bot ausente nas duas transações iniciais ou sem run ativo, encerrando ticker antes do retorno. Ler worker, market_data, modelos, tipos, lifecycle, testes de recuperação e fontes canônicas. Arquivos: worker.py, test_demo_recovery.py, test_worker_lifecycle.py, este documento. Preservar barreira durável, isolamento de execução, fontes, risco e ledger; nenhuma alteração de adapters, schema, estratégia, destino, credenciais, CI, dependências ou permissão. Não executar daemon real, nem acessar corretora: testar ponto de entrada por runpy e interceptar limite asyncio.run, com lifecycle real já testado. A seleção pública Deriv PAPER usa símbolo nativo sem credenciais, observação e estratégia controladas. Ausência de bot entre transações simulada com exclusão real em banco isolado por sessão independente, não com acesso a produção.
+Proof obligations: três cenários de ausência/ociosidade e rota pública Deriv por dialeto SQLite/PostgreSQL (8 casos), mais um teste de ponto de entrada (9 novos, 595 previstos); provar ticker encerrado, ausência de ordens e persistência de snapshot PAPER somente no caso válido. CI completo, segurança, E2E, 100% statements de worker e preservação de demo_execution, sem exclusões artificiais. Não certificar branches, fencing distribuído, kill abrupto, alteração de identidade após claim, autenticidade remota ou validação oficial. Entregáveis: commit, Evidence Bundle, auditoria pt-BR. Stop: falha/CI incompleto/cobertura insuficiente/risco relevante, sem outro delta, merge, deploy, despesas, operações financeiras ou checkpoint. Rollback via revert explícito sem force-push.
+## Evidence Bundle preliminar
+NOT_TESTED até logs deste SHA. F02/F06 abertas, revisão independente pendente. Nenhuma nova infraestrutura. Checkpoint não promovido.

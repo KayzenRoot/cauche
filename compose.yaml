@@ -1,0 +1,72 @@
+name: cauche-pulse
+x-backend: &backend
+  image: cauche-pulse-api:local
+  environment: &backend-environment
+    DATABASE_URL: postgresql+psycopg://cauche:${POSTGRES_PASSWORD:-loopback-bootstrap-db}@db:5432/cauche
+    APP_ORIGIN: ${APP_ORIGIN:-http://localhost:8080}
+    CAUCHE_MASTER_KEY: ${CAUCHE_MASTER_KEY:-}
+    LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-90}
+services:
+  db:
+    image: postgres:17-alpine@sha256:526f86d93c6ea08fd3f1fe5605650cacc781b2c6013169a0ad8f42c7d3d84f32
+    environment:
+      POSTGRES_USER: cauche
+      POSTGRES_DB: cauche
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-loopback-bootstrap-db}
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cauche -d cauche"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  migrate:
+    <<: *backend
+    pull_policy: never
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+  api:
+    <<: *backend
+    environment:
+      <<: *backend-environment
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    build:
+      context: ./backend
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 5s
+      timeout: 4s
+      retries: 15
+    restart: unless-stopped
+  worker:
+    <<: *backend
+    pull_policy: never
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 45s
+    restart: unless-stopped
+  web:
+    build:
+      context: ./frontend
+    ports:
+      - "127.0.0.1:${CAUCHE_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/api/health"]
+      interval: 5s
+      timeout: 4s
+      retries: 8
+    restart: unless-stopped
+volumes:
+  database:
