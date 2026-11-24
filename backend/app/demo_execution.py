@@ -7,10 +7,10 @@ from sqlalchemy.orm import Session
 
 from .db import aware, utcnow
 from .domain import Decision
-from .execution import amount, emit, moment, new_order, record_fill, record_settlement
+from .execution import amount, digest, emit, moment, new_order, record_fill, record_settlement
 from .integrations import Deriv, Kalshi, VenueError
 from .market_data import deriv_symbol
-from .models import Bot, ExchangeConnection, Fee, Order, OrderIntent, Position, RiskConfig, StrategyConfig
+from .models import Bot, ExchangeConnection, Fee, Fill, Order, OrderIntent, Position, RiskConfig, StrategyConfig
 from .quant.types import decimal
 from .security import decrypt_credentials
 
@@ -251,7 +251,162 @@ async def reconcile_deriv(db: Session, order: Order, venue: Deriv) -> None:
     record_settlement(db, order, gross=gross, payout=payout, timestamp=timestamp)
 
 
+def kalshi_timestamp(value, *, earliest: int):
+    if type(value) is not int or value < earliest:
+        raise ValueError("INVALID_KALSHI_RECONCILIATION")
+    try:
+        return moment(value)
+    except (OverflowError, OSError, ValueError):
+        raise ValueError("INVALID_KALSHI_RECONCILIATION") from None
+
+
+def kalshi_order_snapshot(order: Order, current: dict):
+    if (
+        not isinstance(current, dict)
+        or current.get("source") != "KALSHI_DEMO"
+        or current.get("broker_id") != order.broker_id
+        or current.get("client_order_id") != order.intent_id
+        or current.get("instrument") != order.instrument
+        or current.get("side") != order.side
+    ):
+        raise ValueError("INVALID_KALSHI_RECONCILIATION")
+    state = current.get("status")
+    quantity = confirmation_amount(current.get("quantity"))
+    price = confirmation_amount(current.get("price"))
+    filled = confirmation_amount(current.get("filled_quantity"))
+    remaining = confirmation_amount(current.get("remaining_quantity"))
+    fee = confirmation_amount(current.get("fee"), stored=False)
+    previous_filled = confirmation_amount(order.data.get("reported_filled"))
+    if (
+        quantity != order.quantity or quantity <= ZERO or price != order.price
+        or not ZERO < price < 1 or filled + remaining > quantity
+        or filled < previous_filled or remaining > order.remaining_quantity
+        or any(value != value.quantize(Decimal("0.01")) for value in (quantity, filled, remaining))
+    ):
+        raise ValueError("INVALID_KALSHI_RECONCILIATION")
+    if state == "OPEN":
+        consistent = filled == ZERO and remaining == quantity
+    elif state == "PARTIAL":
+        consistent = ZERO < filled < quantity
+    elif state == "FILLED":
+        consistent = filled == quantity and remaining == ZERO
+    elif state == "CANCELLED":
+        consistent = filled == ZERO and remaining == ZERO
+    else:
+        consistent = False
+    if not consistent:
+        raise ValueError("INVALID_KALSHI_RECONCILIATION")
+    return state, filled, remaining, fee
+
+
+def kalshi_fill_snapshot(db: Session, order: Order, rows: list, *, reported: Decimal, fee: Decimal):
+    earliest = int(aware(order.timestamp).timestamp())
+    normalized = {}
+    for row in rows:
+        if (
+            not isinstance(row, dict) or row.get("broker_id") != order.broker_id
+            or row.get("instrument") != order.instrument or row.get("side") != order.side
+        ):
+            raise ValueError("INVALID_KALSHI_RECONCILIATION")
+        key = row.get("fill_id")
+        if not isinstance(key, str) or not key or key != key.strip() or len(key) > 100 or key in normalized:
+            raise ValueError("INVALID_KALSHI_RECONCILIATION")
+        quantity = confirmation_amount(row.get("quantity"))
+        price = confirmation_amount(row.get("price"))
+        cost = confirmation_amount(row.get("fee"))
+        timestamp = kalshi_timestamp(row.get("observed_at"), earliest=earliest)
+        if not ZERO < quantity <= order.quantity or quantity != quantity.quantize(Decimal("0.01")):
+            raise ValueError("INVALID_KALSHI_RECONCILIATION")
+        if not ZERO < price <= order.price:
+            raise ValueError("INVALID_KALSHI_RECONCILIATION")
+        confirmation_amount(quantity * price)
+        normalized[key] = (quantity, price, cost, timestamp)
+
+    total = confirmation_amount(sum((row[0] for row in normalized.values()), ZERO))
+    exposure = confirmation_amount(sum((row[0] * row[1] for row in normalized.values()), ZERO))
+    costs = confirmation_amount(sum((row[2] for row in normalized.values()), ZERO))
+    # Separate reads may temporarily disagree. Never release reserved exposure
+    # or book a partial snapshot as complete; the worker must reconcile again
+    # before it can open another order.
+    if total > reported or costs > fee or (total == reported and costs != fee):
+        raise ValueError("INVALID_KALSHI_RECONCILIATION")
+    if total < reported:
+        raise VenueError("KALSHI_RECONCILIATION_INCOMPLETE", retryable=True)
+
+    existing = db.scalars(select(Fill).where(Fill.order_id == order.id)).all()
+    booked = {}
+    for fill in existing:
+        key = fill.broker_id
+        if (
+            key not in normalized or key in booked or fill.id != digest(order.id, key)
+            or fill.mode != order.mode or fill.exchange != order.exchange
+            or fill.instrument != order.instrument or fill.currency != "USD"
+            or fill.source != order.source
+            or normalized[key] != (fill.quantity, fill.price, fill.fee, aware(fill.timestamp))
+        ):
+            raise ValueError("INVALID_KALSHI_RECONCILIATION")
+        booked[key] = fill
+    booked_fees = {row.id: row.amount for row in db.scalars(select(Fee).where(Fee.order_id == order.id))}
+    if booked_fees != {row.id: row.fee for row in existing if row.fee > ZERO}:
+        raise ValueError("INVALID_KALSHI_RECONCILIATION")
+    position = db.get(Position, order.id)
+    if existing:
+        if (
+            position is None or position.status != "OPEN" or position.side != order.side
+            or position.currency != "USD" or position.source != order.source
+            or position.quantity != sum((row.quantity for row in existing), ZERO)
+            or position.exposure != sum((row.quantity * row.price for row in existing), ZERO)
+        ):
+            raise ValueError("INVALID_KALSHI_RECONCILIATION")
+    elif position is not None:
+        raise ValueError("INVALID_KALSHI_RECONCILIATION")
+
+    # A broker fill identifier must not be attributed to two local orders.
+    if normalized and db.scalar(select(Fill.id).where(
+        Fill.mode == order.mode, Fill.exchange == order.exchange,
+        Fill.broker_id.in_(list(normalized)), Fill.order_id != order.id,
+    ).limit(1)) is not None:
+        raise ValueError("INVALID_KALSHI_RECONCILIATION")
+    latest = max((int(row[3].timestamp()) for row in normalized.values()), default=earliest)
+    return {key: row for key, row in normalized.items() if key not in booked}, total, exposure, costs, latest
+
+
+def kalshi_resolution(order: Order, rows: list, *, quantity: Decimal, exposure: Decimal, fees: Decimal, latest: int):
+    if any(not isinstance(row, dict) for row in rows):
+        raise ValueError("INVALID_KALSHI_RECONCILIATION")
+    matching = [row for row in rows if row.get("instrument") == order.instrument]
+    if not matching:
+        return None
+    if len(matching) != 1:
+        raise ValueError("INVALID_KALSHI_RECONCILIATION")
+    row = matching[0]
+    event = order.data.get("event")
+    if event and row.get("event_ticker") != event:
+        raise ValueError("INVALID_KALSHI_RECONCILIATION")
+    result = row.get("result")
+    binary = {"YES": Decimal("1"), "NO": ZERO}
+    if result not in ("YES", "NO", "SCALAR"):
+        raise ValueError("INVALID_KALSHI_RECONCILIATION")
+    yes_payout = confirmation_amount(row.get("yes_payout", binary.get(result)))
+    if yes_payout > 1 or (result in binary and yes_payout != binary[result]):
+        raise ValueError("INVALID_KALSHI_RECONCILIATION")
+    per_contract = yes_payout if order.side == "YES" else Decimal("1") - yes_payout
+    payout = confirmation_amount(quantity * per_contract)
+    gross = confirmation_amount(payout - exposure, signed=True)
+    confirmation_amount(gross - fees, signed=True)
+    timestamp = kalshi_timestamp(row.get("observed_at"), earliest=latest)
+    return gross, payout, timestamp
+
+
 async def reconcile_kalshi(db: Session, order: Order, venue: Kalshi, *, cancel: bool) -> None:
+    if order.status == "SETTLED":
+        return
+    if (
+        order.mode != "BROKER_DEMO" or order.exchange != "KALSHI"
+        or order.source != BROKER_SOURCE or order.currency != "USD"
+        or order.side not in {"YES", "NO"} or not order.broker_id
+    ):
+        raise ValueError("INVALID_KALSHI_RECONCILIATION")
     if cancel and order.remaining_quantity > ZERO:
         try:
             await venue.cancel_demo(order.broker_id, order.instrument)
@@ -260,51 +415,34 @@ async def reconcile_kalshi(db: Session, order: Order, venue: Kalshi, *, cancel: 
             emit(db, order, "API", error.code, "Demo cancellation requires reconciliation",
                  severity="WARNING", order_id=order.id)
     result = await venue.reconcile_demo(order.broker_id, order.instrument)
-    current = result["order"]
-    persisted = order.status
-    if current:
-        state = current["status"].upper().replace("CANCELED", "CANCELLED")
-        if state in {"OPEN", "ACCEPTED", "PARTIAL", "FILLED", "CANCELLED", "EXPIRED", "REJECTED"}:
-            order.status = state
-            order.remaining_quantity = amount(current.get("remaining_quantity"))
-            order.data = {**order.data, "reported_filled": str(current.get("filled_quantity") or "0")}
-    for fill in result["fills"]:
-        if (
-            fill["broker_id"] != order.broker_id or fill["instrument"] != order.instrument
-            or fill["side"] != order.side
-        ):
-            continue
-        record_fill(
-            db, order, key=fill["fill_id"], broker_id=fill["fill_id"],
-            quantity=amount(fill["quantity"]), price=amount(fill["price"]), fee=amount(fill["fee"]),
-            timestamp=moment(int(fill["observed_at"])),
+    if (
+        not isinstance(result, dict) or not isinstance(result.get("fills"), list)
+        or not isinstance(result.get("settlements"), list)
+    ):
+        raise ValueError("INVALID_KALSHI_RECONCILIATION")
+    state, reported, remaining, fee = kalshi_order_snapshot(order, result.get("order"))
+    new_fills, total, exposure, costs, latest = kalshi_fill_snapshot(
+        db, order, result["fills"], reported=reported, fee=fee,
+    )
+    settlement = None
+    if total > ZERO and total == reported and remaining == ZERO:
+        settlement = kalshi_resolution(
+            order, result["settlements"], quantity=total, exposure=exposure, fees=costs, latest=latest,
         )
+
+    persisted = order.status
+    order.status = state
+    order.remaining_quantity = remaining
+    order.data = {**order.data, "reported_filled": str(reported)}
+    for key, (quantity, price, cost, timestamp) in new_fills.items():
+        record_fill(db, order, key=key, broker_id=key, quantity=quantity, price=price, fee=cost, timestamp=timestamp)
     db.flush()
     if order.status != persisted:
         emit(db, order, "ORDER", "ORDER_RECONCILED", "Broker order state updated",
              order_id=order.id, context={"status": order.status})
-    position = db.get(Position, order.id)
-    reported = amount(order.data.get("reported_filled"))
-    if not position or position.quantity != reported or order.remaining_quantity > ZERO:
-        return
-    for resolution in result["settlements"]:
-        if resolution["instrument"] != order.instrument:
-            continue
-        yes_payout = resolution.get("yes_payout")
-        if yes_payout is None:
-            yes_payout = {"YES": Decimal("1"), "NO": ZERO}.get(resolution["result"])
-        if yes_payout is None:
-            continue
-        per_contract = amount(yes_payout) if order.side == "YES" else Decimal("1") - amount(yes_payout)
-        if not ZERO <= per_contract <= Decimal("1"):
-            continue
-        payout = position.quantity * per_contract
-        record_settlement(
-            db, order, gross=payout - position.exposure, payout=payout,
-            timestamp=moment(int(resolution["observed_at"])),
-        )
-        return
-
+    if settlement is not None:
+        gross, payout, timestamp = settlement
+        record_settlement(db, order, gross=gross, payout=payout, timestamp=timestamp)
 
 async def reconcile(db: Session, bot: Bot, venue, *, cancel: bool) -> None:
     pending = db.scalars(select(OrderIntent).where(

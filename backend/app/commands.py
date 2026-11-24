@@ -53,7 +53,10 @@ def strategy_payload(row: StrategyConfig, definition: dict) -> dict:
 
 def pending_exposure(session: Session, mode: str, exchange: str | None = None) -> bool:
     intent = select(OrderIntent.id).where(OrderIntent.status.in_(INFLIGHT_INTENTS))
-    order = select(Order.id).where(Order.status.in_(OPEN_ORDERS))
+    # A broker-reported fill can precede the persisted position. Until
+    # settlement, FILLED demo orders still represent unresolved exposure.
+    states = (*OPEN_ORDERS, "FILLED") if mode == "BROKER_DEMO" else OPEN_ORDERS
+    order = select(Order.id).where(Order.status.in_(states))
     position = select(Position.id).where(Position.status.in_(OPEN_POSITIONS))
     if mode == "PAPER":
         # Unsettled simulated fixture positions belong to completed finite replays.
