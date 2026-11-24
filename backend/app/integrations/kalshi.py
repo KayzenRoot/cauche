@@ -624,14 +624,18 @@ class Kalshi:
                 row = object_(message.get("msg"))
                 if row.get("market_ticker") != ticker:
                     raise VenueError("INVALID_RESPONSE")
+                bid, ask = _price(row.get("yes_bid_dollars")), _price(row.get("yes_ask_dollars"))
+                observed = number(row.get("ts_ms")) // 1000
+                if bid > ask or not 0 < observed <= int(time.time()):
+                    raise VenueError("INVALID_RESPONSE")
                 yield {
                     "instrument": ticker,
                     "price": _price(row.get("price_dollars")),
-                    "yes_bid": _price(row.get("yes_bid_dollars")),
-                    "yes_ask": _price(row.get("yes_ask_dollars")),
+                    "yes_bid": bid,
+                    "yes_ask": ask,
                     "yes_bid_size": _quantity(row.get("yes_bid_size_fp")),
                     "yes_ask_size": _quantity(row.get("yes_ask_size_fp")),
-                    "observed_at": number(row.get("ts_ms")) // 1000,
+                    "observed_at": observed,
                     "source": "KALSHI_DEMO",
                 }
 
@@ -667,10 +671,14 @@ class Kalshi:
                     if row.get("market_ticker") != ticker:
                         raise VenueError("INVALID_RESPONSE")
                     next_sequence = number(message.get("seq"))
+                    if next_sequence <= 0:
+                        raise VenueError("INVALID_RESPONSE")
                     if kind == "orderbook_snapshot":
+                        if book and next_sequence <= sequence:
+                            raise VenueError("INVALID_RESPONSE")
                         book = {
-                            "yes": _levels(row.get("yes_dollars_fp", [])),
-                            "no": _levels(row.get("no_dollars_fp", [])),
+                            "yes": _levels(row.get("yes_dollars_fp")),
+                            "no": _levels(row.get("no_dollars_fp")),
                         }
                     elif book and next_sequence == sequence + 1:
                         _apply_delta(book, row)
@@ -683,16 +691,22 @@ class Kalshi:
                         break
                     sequence = next_sequence
                     received = int(time.time() * 1000)
-                    observed = row.get("ts_ms", message.get("sending_ts_ms", received))
+                    observed = number(row.get("ts_ms", message.get("sending_ts_ms", received))) // 1000
+                    if not 0 < observed <= received // 1000:
+                        raise VenueError("INVALID_RESPONSE")
                     yield {
                         **_book(book["yes"], book["no"]),
                         "instrument": ticker,
                         "source": "KALSHI_DEMO",
-                        "observed_at": number(observed) // 1000,
+                        "observed_at": observed,
                     }
             await asyncio.sleep(1)
 
     async def _stream(self, url: str, channel: str, ticker: str) -> AsyncIterator[dict]:
+        if (url, channel) not in {(_DEMO_WS, "ticker"), (_DEMO_WS, "orderbook_delta"), (_USER_WS, "fill")}:
+            raise VenueError("DEMO_DESTINATION_BLOCKED")
+        self._require_demo()
+        identifier(ticker, _TICKER)
         delay = 1
         subscription = {
             "id": 1,
@@ -710,6 +724,8 @@ class Kalshi:
                         message = await receive(websocket)
                         if message.get("type") == "error":
                             raise VenueError("SUBSCRIPTION_REJECTED")
+                        if "status" in message:
+                            raise VenueError("INVALID_RESPONSE")
                         delay = 1
                         yield message
             except VenueError as exc:
@@ -890,7 +906,7 @@ def _book(yes: dict[Decimal, Decimal], no: dict[Decimal, Decimal]) -> dict:
 
 def _apply_delta(book: dict[str, dict], row: dict) -> None:
     side = row.get("side")
-    if side not in book:
+    if side not in ("yes", "no") or side not in book:
         raise VenueError("INVALID_RESPONSE")
     price = _price(row.get("price_dollars"))
     total = _quantity(book[side].get(price, 0) + decimal(row.get("delta_fp")))
