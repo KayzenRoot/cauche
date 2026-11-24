@@ -1017,3 +1017,128 @@ async def test_kalshi_alternative_resolution_exact_net(recovery_db, result, payo
         assert row.net_pnl == Decimal(expected_net)
         assert row.fees == Decimal("0.01")
         assert db.get(Position, "claim-fixture").status == "SETTLED"
+
+
+# CD-12: idle worker, error isolation and finite replay shutdown.
+async def test_worker_without_bot_does_not_attempt_io(recovery_db, venue):
+    with recovery_db.begin() as db:
+        db.delete(db.get(Bot, 1))
+    assert await worker.step() == worker.MARKET_TICK
+    worker.observe.assert_not_awaited()
+    venue.reconcile_demo.assert_not_awaited()
+    venue.submit_demo.assert_not_awaited()
+
+
+async def test_worker_without_run_heartbeats_without_io(recovery_db, venue):
+    with recovery_db.begin() as db:
+        bot = db.get(Bot, 1)
+        bot.run_id = None
+        bot.state = bot.desired_state = "STOPPED"
+    assert await worker.step() == 1.0
+    worker.observe.assert_not_awaited()
+    venue.reconcile_demo.assert_not_awaited()
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        bot = db.get(Bot, 1)
+        assert bot.heartbeat_at is not None
+        assert bot.run_id is None and bot.state == "STOPPED"
+        assert db.scalar(select(func.count()).select_from(OrderIntent)) == 0
+
+
+def test_worker_stale_error_does_not_mutate_current_run(recovery_db):
+    worker.error_state("obsolete-run", "STALE_FIXTURE_ERROR", retryable=False)
+    with recovery_db() as db:
+        bot = db.get(Bot, 1)
+        assert bot.last_error is None and bot.state == bot.desired_state == "RUNNING"
+        assert bot.heartbeat_at is None
+        assert db.scalar(select(func.count()).select_from(SystemEvent)) == 0
+
+
+async def test_worker_replay_end_preserves_unresolved_position(recovery_db, venue, monkeypatch):
+    from app.execution import new_order, record_fill
+
+    seed_claim(recovery_db)
+    with recovery_db.begin() as db:
+        bot = db.get(Bot, 1)
+        run = db.get(StrategyRun, bot.run_id)
+        intent = db.get(OrderIntent, "claim-fixture")
+        bot.mode = run.mode = intent.mode = "REPLAY"
+        db.get(Signal, intent.signal_id).mode = "REPLAY"
+        intent.status = "CONFIRMED"
+        decision = Decision.from_dict(intent.request["decision"])
+        order = new_order(db, intent, decision, status="FILLED", source="SIMULATED_FIXTURE")
+        record_fill(db, order, key="fixture-fill", quantity=Decimal("1"), price=Decimal("0.40"),
+                    fee=Decimal("0.01"), timestamp=utcnow())
+        db.add(OrderIntent(
+            id="pending-replay", signal_id=intent.signal_id, status="PROPOSED",
+            mode=bot.mode, exchange=bot.exchange, strategy=bot.strategy,
+            instrument=bot.instrument, run_id=bot.run_id, request=intent.request, risk=intent.risk,
+        ))
+    monkeypatch.setattr(worker, "observe", AsyncMock(return_value=None))
+    assert await worker.step() == 1.0
+    venue.reconcile_demo.assert_not_awaited()
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        bot = db.get(Bot, 1)
+        position = db.get(Position, "claim-fixture")
+        assert bot.state == bot.desired_state == "STOPPED" and bot.cursor == 0
+        assert db.get(StrategyRun, bot.run_id).finished_at is not None
+        assert position.status == "UNRESOLVED" and position.exposure == Decimal("0.40")
+        assert db.get(OrderIntent, "pending-replay").status == "CANCELLED"
+        assert db.get(Settlement, "claim-fixture") is None
+        assert db.scalar(select(func.count()).select_from(Fill)) == 1
+        assert db.scalar(select(func.count()).select_from(Fee)) == 1
+        assert db.scalar(select(func.count()).select_from(SystemEvent).where(
+            SystemEvent.code == "FIXTURE_ENDED_WITH_OPEN_POSITIONS",
+        )) == 1
+
+
+async def test_worker_missing_demo_connection_fails_closed(recovery_db, venue):
+    with recovery_db.begin() as db:
+        db.delete(db.get(ExchangeConnection, "KALSHI"))
+    assert await worker.step() == worker.MARKET_TICK
+    worker.observe.assert_not_awaited()
+    venue.reconcile_demo.assert_not_awaited()
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        bot = db.get(Bot, 1)
+        assert bot.state == "ERROR" and bot.desired_state == "PAUSED"
+        assert bot.last_error == "INVALID_CONFIGURATION_OR_SOURCE"
+        assert bot.cursor == 0
+
+
+async def test_worker_key_error_sanitized_and_paused(recovery_db, venue, monkeypatch):
+    monkeypatch.setattr(worker, "observe", AsyncMock(side_effect=KeyError("PRIVATE_FIXTURE_DETAIL")))
+    assert await worker.step() == worker.MARKET_TICK
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        bot = db.get(Bot, 1)
+        assert bot.state == "ERROR" and bot.desired_state == "PAUSED"
+        assert bot.last_error == "INVALID_CONFIGURATION_OR_SOURCE"
+        assert bot.cursor == 0
+        assert db.scalar(select(func.count()).select_from(SystemEvent).where(
+            SystemEvent.code == "INVALID_CONFIGURATION_OR_SOURCE",
+        )) == 1
+
+
+async def test_worker_changed_cursor_discards_observation(recovery_db, venue, monkeypatch):
+    venue.verify_demo = AsyncMock(return_value={
+        "currency": "USD", "balance": Decimal("100"), "source": "KALSHI_DEMO", "environment": "BROKER_DEMO",
+    })
+    monkeypatch.setattr(worker, "has_unmanaged_exposure", AsyncMock(return_value=False))
+
+    async def change(*_args, **_kwargs):
+        with recovery_db.begin() as db:
+            db.get(Bot, 1).cursor = 1
+        return Mock()
+
+    monkeypatch.setattr(worker, "observe", AsyncMock(side_effect=change))
+    save = Mock(side_effect=AssertionError("stale observation cannot persist"))
+    monkeypatch.setattr(worker, "save_market", save)
+    assert await worker.step() == worker.MARKET_TICK
+    save.assert_not_called()
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        bot = db.get(Bot, 1)
+        assert bot.cursor == 1 and bot.last_error is None
+        assert db.scalar(select(func.count()).select_from(OrderIntent)) == 0

@@ -355,21 +355,23 @@ async def loop() -> None:
             signal.signal(signum, lambda *_: event_loop.call_soon_threadsafe(stopped.set))
     ticker = MarketTicker()
     LOG.info("worker_start")
-    while not stopped.is_set():
-        delay = MARKET_TICK
-        try:
-            delay = await leased_step(ticker)
-        except SQLAlchemyError:
-            LOG.warning("worker_database_unavailable")
-        except Exception:
-            # Upstream messages may contain secrets. Expose a safe code only.
-            LOG.error("worker_unexpected_error")
-        try:
-            await asyncio.wait_for(stopped.wait(), timeout=delay)
-        except TimeoutError:
-            continue
-    await ticker.select(None)
-    LOG.info("worker_stop")
+    try:
+        while not stopped.is_set():
+            delay = MARKET_TICK
+            try:
+                delay = await leased_step(ticker)
+            except SQLAlchemyError:
+                LOG.warning("worker_database_unavailable")
+            except Exception:
+                # Upstream messages may contain secrets. Expose a safe code only.
+                LOG.error("worker_unexpected_error")
+            try:
+                await asyncio.wait_for(stopped.wait(), timeout=delay)
+            except TimeoutError:
+                continue
+    finally:
+        await ticker.select(None)
+        LOG.info("worker_stop")
 
 
 def main() -> None:
