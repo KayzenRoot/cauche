@@ -1,0 +1,10 @@
+# CAU-MVP-001/CD-33 - cobertura residual de backtest
+
+Status PROPOSED / NOT PROMOTED. HIGH_ASSURANCE. CD-32 APPROVED no comentário 7140682838; push 45459428746 e PR 45459440823: 1348 Python, 4 E2E por CI, simulation 90/90, backend 4153/4395; onze módulos prioritários a 100%.
+
+## Context Lock
+Base 5415f7fe6aa7c6ee443935b6be0fbdc1767722c4; main a8e69195192a0abda82298927f0b0f231a86ea7b; PR #2 7e6faee7c00cfd65628379576011e51f54a5ff8d. Fingerprints conferidos: checkpoint b2f0247d36514b625b203cecf587432a957b2a66; ledger 2db4cb6daa284c8bffce82cdfca1a4efe8ea4ce4; scope 7084e1c86918b7716c023dc947c7a24efa28ce8a; DoD 6e73ebfa3a385fc7e49ff56f372856f84537ff15; architecture d536ac3f1ba924ef80299e6569d8b0ab25eff78d; requirements 4c8e80e8aa65cacc8040ec0dd96a46e385556c34; backtest.py 95b869f800c3eae63b34d07a2e3e9ee1642245eb; risk.py a8871506eae05b09584900d1fe9fa10e0c44ef4f; test_quant_core.py 1d1a14ae7ab0133a2ca8066bb2bd0e97970d5aed.
+
+## Work Order
+NECESSARY: cobrir 14 instruções residuais de app/quant/backtest.py (22,24,30-35,224,329,334,338,341,344); filtros UTC, entradas inválidas, saldo inicial, custos, incompatibilidade de estratégia/exchange, período invertido e reavaliação de risco pós-fill simulado com controle positivo. Ler fontes canônicas, backtest.py, risk.py e testes existentes. Somente testes/documentação; fixtures determinísticas sem rede, credenciais ou operações financeiras; não modificar algoritmos, limites, dependências, CI, exclusões, PR #2 ou checkpoint.
+Proof obligations: 23 casos previstos, 1371 Python previstos; backtest 176/176 e backend 4167/4395 se comprovados; preservar onze módulos a 100%, ambos CIs integrais, 4 E2E por CI, SQLite/PostgreSQL, segurança e lint/typecheck/build. Entregáveis testes, WO, commit/push e Evidence Bundle pt-BR. NOT_TESTED até CI; não avançar com falhas ou evidência incompleta. Fora de escopo: revisão independente, aceitação oficial e demais módulos. Sem merge, deploy, despesas ou operações financeiras; rollback via revert explícito, sem force-push.

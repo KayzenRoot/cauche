@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 248 64">
+  <rect width="64" height="64" rx="17" fill="#B5FF39"/>
+  <path d="M12 34h10l6-14 8 24 6-14h10" fill="none" stroke="#081204" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="77" y="41" font-size="25" font-family="system-ui,sans-serif" font-weight="800" letter-spacing="-1" fill="#F3F7F2">CAUCHE <tspan fill="#B5FF39">PULSE</tspan></text>
+</svg>
