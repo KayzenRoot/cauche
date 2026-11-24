@@ -292,3 +292,77 @@ def test_demo_verification_needs_demo_provenance(clients, monkeypatch):
     assert verified.status_code == 200 and verified.json()["status"] == "CONNECTED"
     assert verified.json()["capabilities"]["demo_balance"] == "123.45"
     assert "fixture-credential" not in verified.text
+
+
+# CD-28: residual security paths, isolated sessions and ephemeral keys.
+@pytest.mark.parametrize("configured", [False, True])
+def test_missing_or_invalid_master_key_fails_closed(monkeypatch, configured):
+    if configured:
+        monkeypatch.setenv("CAUCHE_MASTER_KEY", "invalid-fixture-key")
+    else:
+        monkeypatch.delenv("CAUCHE_MASTER_KEY", raising=False)
+    with pytest.raises(ValueError, match="^MASTER_KEY_NOT_CONFIGURED$"):
+        security.encrypt_credentials({"token": "fixture"})
+
+
+@pytest.mark.parametrize("payload", [b"[]", b'{"token": 1}', b"not-json", b"\xff"])
+def test_decryption_rejects_invalid_authenticated_payload(monkeypatch, payload):
+    key = Fernet.generate_key()
+    monkeypatch.setenv("CAUCHE_MASTER_KEY", key.decode())
+    ciphertext = Fernet(key).encrypt(payload).decode()
+    with pytest.raises(ValueError, match="^CREDENTIALS_UNAVAILABLE$"):
+        security.decrypt_credentials(ciphertext)
+
+
+@pytest.mark.parametrize("wrong_key", [False, True])
+def test_invalid_ciphertext_never_returns_credentials(monkeypatch, wrong_key):
+    key = Fernet.generate_key()
+    monkeypatch.setenv("CAUCHE_MASTER_KEY", key.decode())
+    if wrong_key:
+        ciphertext = Fernet(Fernet.generate_key()).encrypt(b'{"token":"fixture"}').decode()
+    else:
+        ciphertext = "invalid-fixture-ciphertext"
+    with pytest.raises(ValueError, match="^CREDENTIALS_UNAVAILABLE$"):
+        security.decrypt_credentials(ciphertext)
+
+
+def test_unknown_session_token_never_authenticates(clients):
+    client, local = clients
+    with local() as db:
+        assert security.authenticate(db, "unissued-fixture-session") is None
+    client.cookies.set(COOKIE_NAME, "unissued-fixture-session")
+    assert client.get("/api/auth/session").status_code == 401
+
+
+def test_login_throttle_expired_window_resets(clients):
+    from app.models import LoginThrottle
+
+    client, local = clients
+    assert login(client, password="incorrect-fixture").status_code == 401
+    with local.begin() as db:
+        row = db.scalars(select(LoginThrottle)).one()
+        row.attempts = 8
+        row.window_start = utcnow() - timedelta(minutes=6)
+    assert login(client, password="incorrect-fixture").status_code == 401
+    with local() as db:
+        row = db.scalars(select(LoginThrottle)).one()
+        assert row.attempts == 1
+    assert login(client).status_code == 200
+    with local() as db:
+        assert db.scalars(select(LoginThrottle)).one().attempts == 0
+
+
+def test_successful_login_upgrades_stale_password_hash(clients, monkeypatch):
+    client, local = clients
+    with local() as db:
+        previous = db.get(User, 1).password_hash
+    stronger = PasswordHasher(time_cost=2, memory_cost=4096, parallelism=1)
+    assert stronger.check_needs_rehash(previous)
+    monkeypatch.setattr(security, "HASHER", stronger)
+    assert login(client).status_code == 200
+    with local() as db:
+        updated = db.get(User, 1).password_hash
+        assert updated != previous
+        assert stronger.verify(updated, TEST_PASSWORD)
+        assert not stronger.check_needs_rehash(updated)
+    assert client.get("/api/auth/session").status_code == 200
