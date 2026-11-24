@@ -1,12 +1,14 @@
 """CD-04: real transaction boundaries, no broker network or credentials."""
 
+import asyncio
 import os
 from decimal import Decimal
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, func, select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.schema import CreateSchema, DropSchema
 
@@ -492,3 +494,93 @@ async def test_kalshi_fill_cannot_be_attributed_to_another_order(recovery_db):
         assert db.get(Position, "claim-fixture") is None
         assert db.get(Order, "claim-fixture").status == "OPEN"
         assert db.scalar(select(func.count()).select_from(Fill)) == 1
+
+
+# CD-07: transaction-scoped worker lease; real isolated databases, mocked step.
+@pytest.fixture
+def lease_engine(recovery_db, monkeypatch):
+    engine = recovery_db.kw["bind"]
+    monkeypatch.setattr(worker, "engine", engine)
+    return engine
+
+
+async def test_worker_lease_success_releases_connection(lease_engine, monkeypatch):
+    tick = AsyncMock(return_value=0.25)
+    monkeypatch.setattr(worker, "step", tick)
+    ticker = Mock()
+    for _ in range(3):
+        assert await worker.leased_step(ticker) == 0.25
+    assert tick.await_count == 3
+    tick.assert_awaited_with(ticker)
+    if lease_engine.dialect.name == "postgresql":
+        with lease_engine.begin() as connection:
+            assert connection.scalar(text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": worker.LEASE_KEY})
+
+
+@pytest.mark.parametrize("failure", ["database", "unexpected", "cancelled"])
+async def test_worker_lease_released_after_failure(lease_engine, monkeypatch, failure):
+    errors = {
+        "database": OperationalError("SELECT 1", {}, RuntimeError("fixture")),
+        "unexpected": RuntimeError("fixture"),
+        "cancelled": asyncio.CancelledError(),
+    }
+    tick = AsyncMock(side_effect=[errors[failure], 0.5])
+    monkeypatch.setattr(worker, "step", tick)
+    with pytest.raises(type(errors[failure])):
+        await worker.leased_step()
+    if lease_engine.dialect.name == "postgresql":
+        with lease_engine.begin() as connection:
+            assert connection.scalar(text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": worker.LEASE_KEY})
+    assert await worker.leased_step() == 0.5
+    assert tick.await_count == 2
+
+
+async def test_worker_lease_actual_contention_and_cancellation(lease_engine, monkeypatch):
+    if lease_engine.dialect.name != "postgresql":
+        # SQLite does not provide the PostgreSQL advisory-lock contract.
+        tick = AsyncMock(return_value=0.5)
+        monkeypatch.setattr(worker, "step", tick)
+        assert await worker.leased_step() == 0.5
+        tick.assert_awaited_once_with(None)
+        return
+
+    entered = asyncio.Event()
+    hold = asyncio.Event()
+    calls = []
+
+    async def tick(_ticker):
+        calls.append("entered")
+        entered.set()
+        await hold.wait()
+        return 0.5
+
+    monkeypatch.setattr(worker, "step", tick)
+    task = asyncio.create_task(worker.leased_step())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        # A distinct connection cannot run a second step during the first.
+        assert await worker.leased_step() == worker.MARKET_TICK
+        assert calls == ["entered"]
+        with lease_engine.begin() as connection:
+            assert not connection.scalar(
+                text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": worker.LEASE_KEY},
+            )
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    hold.set()
+    assert await worker.leased_step() == 0.5
+    assert calls == ["entered", "entered"]
+
+
+async def test_worker_lease_database_failure_never_runs_step(lease_engine, monkeypatch):
+    tick = AsyncMock()
+    monkeypatch.setattr(worker, "step", tick)
+    failed = Mock()
+    failed.begin.side_effect = OperationalError("CONNECT", {}, RuntimeError("fixture"))
+    monkeypatch.setattr(worker, "engine", failed)
+    with pytest.raises(OperationalError):
+        await worker.leased_step()
+    tick.assert_not_awaited()

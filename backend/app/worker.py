@@ -299,6 +299,21 @@ def purge_logs(db) -> None:
     ))
 
 
+async def leased_step(ticker: MarketTicker | None = None) -> float:
+    """Serialize one worker tick with a transaction-scoped PostgreSQL lease.
+
+    Commit, rollback or connection termination releases the lock, including
+    cancellation and exceptions. Never return a session-level lock to the pool.
+    SQLite remains a single-worker local test backend, not a distributed lease.
+    """
+    with engine.begin() as lease:
+        if lease.dialect.name == "postgresql" and not lease.scalar(
+            text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": LEASE_KEY},
+        ):
+            return MARKET_TICK
+        return await step(ticker)
+
+
 async def loop() -> None:
     stopped = asyncio.Event()
     event_loop = asyncio.get_running_loop()
@@ -312,17 +327,7 @@ async def loop() -> None:
     while not stopped.is_set():
         delay = MARKET_TICK
         try:
-            with engine.connect() as lease:
-                if lease.dialect.name == "postgresql":
-                    acquired = lease.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": LEASE_KEY})
-                else:
-                    acquired = True
-                try:
-                    if acquired:
-                        delay = await step(ticker)
-                finally:
-                    if acquired and lease.dialect.name == "postgresql" and not lease.invalidated:
-                        lease.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": LEASE_KEY})
+            delay = await leased_step(ticker)
         except SQLAlchemyError:
             LOG.warning("worker_database_unavailable")
         except Exception:
