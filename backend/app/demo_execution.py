@@ -38,14 +38,22 @@ async def has_unmanaged_exposure(venue) -> bool:
 
 
 def acknowledge(db: Session, intent: OrderIntent, result: dict) -> Order:
-    broker_id = str(result["broker_id"])
-    if not broker_id or len(broker_id) > 100:
+    broker_id = result.get("broker_id")
+    broker_status = result.get("status")
+    if (
+        not isinstance(broker_id, str) or not broker_id.strip()
+        or broker_id != broker_id.strip() or len(broker_id) > 100
+        or not isinstance(broker_status, str)
+    ):
         raise ValueError("INVALID_BROKER_CONFIRMATION")
     decision = Decision.from_dict(intent.request["decision"])
-    broker_status = str(result["status"])
     state = broker_status.upper().replace("CANCELED", "CANCELLED")
     if state not in {"ACCEPTED", "OPEN", "PARTIAL", "FILLED", "CANCELLED", "EXPIRED", "REJECTED"}:
-        state = "ACCEPTED"
+        raise ValueError("INVALID_BROKER_CONFIRMATION")
+    # Deriv's normalized buy acknowledgement is OPEN, never a rejection or cancellation.
+    # Do not create an unconditional fill for any other state.
+    if intent.exchange == "DERIV" and state != "OPEN":
+        raise ValueError("INVALID_BROKER_CONFIRMATION")
     price = amount(result.get("price"), decision.price)
     remaining = amount(result.get("remaining_quantity"))
     if price <= ZERO or remaining < ZERO or remaining > decision.quantity:
