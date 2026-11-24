@@ -59,6 +59,25 @@ _KNOWN_REJECTIONS = {
 }
 
 
+def account_headers(app_id: str | None, token: str | None) -> dict[str, str]:
+    if not app_id or not token:
+        raise VenueError("NOT_CONFIGURED")
+    if (
+        re.fullmatch(r"[A-Za-z0-9_-]{1,100}", app_id) is None
+        or re.fullmatch(r"[\x21-\x7e]{1,4096}", token) is None
+    ):
+        raise VenueError("AUTH_ERROR")
+    return {"Deriv-App-ID": app_id, "Authorization": f"Bearer {token}"}
+
+
+async def read_option_accounts(auth, transport=None) -> list:
+    payload = await request_json(
+        "GET", _ACCOUNTS, auth=auth, transport=transport,
+        pace_seconds=1, pace_bucket=_ACCOUNT_BUCKET,
+    )
+    return array(payload.get("data"))
+
+
 class Deriv:
     def __init__(
         self,
@@ -77,14 +96,7 @@ class Deriv:
         self._request_ids = itertools.count(1)
 
     def _headers(self) -> dict[str, str]:
-        if not self._app_id or not self._token:
-            raise VenueError("NOT_CONFIGURED")
-        if (
-            re.fullmatch(r"[A-Za-z0-9_-]{1,100}", self._app_id) is None
-            or re.fullmatch(r"[\x21-\x7e]{1,4096}", self._token) is None
-        ):
-            raise VenueError("AUTH_ERROR")
-        return {"Deriv-App-ID": self._app_id, "Authorization": f"Bearer {self._token}"}
+        return account_headers(self._app_id, self._token)
 
     @staticmethod
     def _demo_url(raw: Any) -> str:
@@ -112,15 +124,7 @@ class Deriv:
 
     async def _demo_target(self) -> tuple[str, dict]:
         selected = identifier(self._account_id) if self._account_id else None
-        payload = await request_json(
-            "GET",
-            _ACCOUNTS,
-            auth=self._headers,
-            transport=self._transport,
-            pace_seconds=1,
-            pace_bucket=_ACCOUNT_BUCKET,
-        )
-        accounts = list(map(object_, array(payload.get("data"))))
+        accounts = list(map(object_, await read_option_accounts(self._headers, self._transport)))
         eligible = []
         for entry in accounts:
             if entry.get("account_type") != "demo" or entry.get("status") != "active":
@@ -252,15 +256,23 @@ class Deriv:
                 result.append(bar(opened, raw))
         return _ordered_unique(result)
 
-    async def history_ticks(self, instrument: str, limit: int = 200) -> list[dict]:
+    async def history_ticks(
+        self, instrument: str, limit: int = 200, *, start_at: int | None = None, end_at: int | None = None,
+    ) -> list[dict]:
         if not 1 <= limit <= 1000:
             raise VenueError("INVALID_HISTORY_RANGE")
+        if start_at is not None or end_at is not None:
+            if (type(start_at) is not int or type(end_at) is not int
+                    or not 0 < start_at < end_at <= min(9_999_999_999, int(time.time()))):
+                raise VenueError("INVALID_HISTORY_RANGE")
         payload = {
             "ticks_history": identifier(instrument, _SYMBOL),
-            "end": "latest",
+            "end": "latest" if end_at is None else str(end_at),
             "style": "ticks",
             "count": limit,
         }
+        if start_at is not None:
+            payload["start"] = start_at
         async with socket_session(_PUBLIC_WS, self._connect) as websocket:
             history = object_(await self._rpc(websocket, "history", payload))
         times = array(history.get("times"))
@@ -273,6 +285,8 @@ class Deriv:
         for timestamp, price in zip(times, prices, strict=True):
             observed_at, amount = number(timestamp), decimal(price)
             if not max(0, previous) <= observed_at <= now or amount <= 0:
+                raise VenueError("INVALID_RESPONSE")
+            if start_at is not None and not start_at <= observed_at <= end_at:
                 raise VenueError("INVALID_RESPONSE")
             rows.append({
                 "instrument": instrument,
