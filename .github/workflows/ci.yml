@@ -6,6 +6,20 @@ permissions:
 jobs:
   backend:
     runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:526f86d93c6ea08fd3f1fe5605650cacc781b2c6013169a0ad8f42c7d3d84f32
+        env:
+          POSTGRES_USER: cauche_test
+          POSTGRES_DB: cauche_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U cauche_test -d cauche_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     defaults:
       run:
         working-directory: backend
@@ -18,6 +32,8 @@ jobs:
       - run: uv sync --locked
       - run: uv run --locked ruff check app tests alembic
       - run: uv run --locked python -m pytest --cov=app --cov-report=term-missing
+        env:
+          CAUCHE_TEST_POSTGRES_PORT: ${{ job.services.postgres.ports[5432] }}
       - run: uv run --locked bandit -r app --severity-level medium
       - run: uv run --locked pip-audit
 

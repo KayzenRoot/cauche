@@ -182,6 +182,8 @@ async def dispatch(db: Session, bot: Bot, intent: OrderIntent) -> None:
 
 
 async def recover_claim(db: Session, bot: Bot, venue, intent: OrderIntent) -> None:
+    if intent.status not in {"SUBMITTING", "UNKNOWN"}:
+        return
     if intent.status == "SUBMITTING":
         intent.status = "UNKNOWN"
         bot.state = "RISK_BLOCKED"

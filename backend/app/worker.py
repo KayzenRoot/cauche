@@ -95,6 +95,37 @@ def update_state(db, bot: Bot, *, blocked: bool) -> bool:
     return bot.desired_state == "RUNNING"
 
 
+def has_ambiguous_claim(db, bot: Bot) -> bool:
+    if bot.mode != "BROKER_DEMO":
+        return False
+    return db.scalar(select(OrderIntent.id).where(
+        OrderIntent.mode == "BROKER_DEMO",
+        OrderIntent.status.in_(("SUBMITTING", "UNKNOWN")),
+    ).limit(1)) is not None
+
+
+def persist_recovery_barrier(db, bot: Bot) -> None:
+    """Commit ambiguous claims and the pause before any broker lookup.
+
+    Caller holds the bot row lock and the worker lease. A crash between
+    claim persistence and submission is deliberately treated as ambiguous.
+    """
+    if bot.mode != "BROKER_DEMO":
+        return
+    pending = db.scalars(select(OrderIntent).where(
+        OrderIntent.mode == "BROKER_DEMO",
+        OrderIntent.status.in_(("SUBMITTING", "UNKNOWN")),
+    ).order_by(OrderIntent.id).with_for_update()).all()
+    for intent in pending:
+        if intent.status == "SUBMITTING":
+            intent.status = "UNKNOWN"
+            intent.response = {"code": "SUBMISSION_UNKNOWN", "outcome_unknown": True}
+            emit(db, intent, "RISK", "SUBMISSION_UNKNOWN", "Prior submission requires broker reconciliation",
+                 severity="WARNING", order_id=intent.id)
+    if pending and bot.desired_state != "STOPPED":
+        update_state(db, bot, blocked=True)
+
+
 def error_state(run_id: str | None, code: str, *, retryable: bool = True) -> None:
     with SessionLocal.begin() as db:
         bot = locked_bot(db)
@@ -116,6 +147,15 @@ async def step(ticker: MarketTicker | None = None) -> float:
     global _RETAIN_COUNTER
     run_id = None
     try:
+        # Separate commit: a failed lookup or accounting transaction must
+        # never roll back the persisted UNKNOWN state or safety pause.
+        with SessionLocal.begin() as db:
+            bot = locked_bot(db)
+            if bot is None:
+                return MARKET_TICK
+            run_id = bot.run_id
+            persist_recovery_barrier(db, bot)
+
         with SessionLocal.begin() as db:
             bot = locked_bot(db)
             if bot is None:
@@ -131,7 +171,9 @@ async def step(ticker: MarketTicker | None = None) -> float:
             config = db.get(StrategyConfig, bot.strategy)
             risk = db.get(RiskConfig, 1)
             limits = {**risk.thresholds, "kill_switch": risk.kill_switch}
-            can_open = update_state(db, bot, blocked=risk.kill_switch or not config.enabled)
+            can_open = update_state(
+                db, bot, blocked=risk.kill_switch or not config.enabled or has_ambiguous_claim(db, bot),
+            )
             fixture = fixture_enabled(bot.mode, bot.exchange, bot.instrument)
             mode, exchange, instrument, cursor = bot.mode, bot.exchange, bot.instrument, bot.cursor
             strategy, version = run.strategy, run.strategy_version
@@ -182,7 +224,9 @@ async def step(ticker: MarketTicker | None = None) -> float:
             risk = db.get(RiskConfig, 1)
             config = db.get(StrategyConfig, bot.strategy)
             limits = {**risk.thresholds, "kill_switch": risk.kill_switch}
-            can_open = update_state(db, bot, blocked=risk.kill_switch or not config.enabled)
+            can_open = update_state(
+                db, bot, blocked=risk.kill_switch or not config.enabled or has_ambiguous_claim(db, bot),
+            )
             if fixture and not can_open:
                 return 1.0
             if market is None:
