@@ -108,20 +108,50 @@ async def deriv_observation(instrument: str, parameters: dict) -> Market:
     )
 
 
+BOOK_MAX_AGE = 15
+
+
 def normalize_book(meta: dict, levels: dict) -> Book | None:
-    if any(levels.get(key) is None for key in ("yes_bid", "yes_ask", "yes_bid_size", "yes_ask_size")):
+    if not isinstance(meta, dict) or not isinstance(levels, dict):
+        raise ValueError("INVALID_MARKET_BOOK")
+    keys = ("yes_bid", "yes_ask", "yes_bid_size", "yes_ask_size")
+    if any(levels.get(key) is None for key in keys):
         return None
-    ranges = meta.get("price_ranges") or []
-    # Only a uniform price grid is supported for order eligibility.
-    if len(ranges) != 1:
+    ranges = meta.get("price_ranges")
+    # A single uniform price grid is required for order eligibility.
+    if not isinstance(ranges, list) or len(ranges) != 1:
         return None
+    if not isinstance(ranges[0], dict):
+        raise ValueError("INVALID_MARKET_BOOK")
     rate, maker_rate = meta.get("taker_fee_rate"), meta.get("maker_fee_rate")
-    return Book(
-        Decimal(str(levels["yes_bid"])), Decimal(str(levels["yes_ask"])),
-        Decimal(str(levels["yes_bid_size"])), Decimal(str(levels["yes_ask_size"])),
-        Decimal(str(ranges[0]["step"])), Decimal(str(maker_rate or ZERO)),
-        Decimal(str(rate or ZERO)), fee_schedule_verified=rate is not None and maker_rate is not None,
-    )
+    values = [*(levels[key] for key in keys), ranges[0].get("step"),
+              maker_rate if maker_rate is not None else ZERO,
+              rate if rate is not None else ZERO]
+    if any(isinstance(value, bool) or not isinstance(value, (Decimal, str, int)) for value in values):
+        raise ValueError("INVALID_MARKET_BOOK")
+    try:
+        book = Book(*(decimal(value) for value in values),
+                    fee_schedule_verified=rate is not None and maker_rate is not None)
+    except ValueError:
+        raise ValueError("INVALID_MARKET_BOOK") from None
+    if not book.valid():
+        return None
+    return book
+
+
+def book_timestamp(levels: dict, meta: dict, now: int) -> int:
+    if (
+        not isinstance(levels, dict)
+        or levels.get("instrument") != meta["instrument"]
+        or levels.get("event") != meta["event_ticker"]
+        or levels.get("source") != meta["source"]
+        or type(levels.get("observed_at")) is not int
+    ):
+        raise ValueError("INVALID_MARKET_CONTEXT")
+    timestamp = levels["observed_at"]
+    if timestamp < 0 or not 0 <= now - timestamp <= BOOK_MAX_AGE:
+        raise ValueError("STALE_MARKET_DATA")
+    return timestamp
 
 
 async def discover_relation(venue: Kalshi, meta: dict) -> Relation | None:
@@ -130,17 +160,26 @@ async def discover_relation(venue: Kalshi, meta: dict) -> Relation | None:
         key=lambda row: (row.get("no_ask") or Decimal("1"), row["instrument"]),
     )
     for peer in siblings[:3]:
+        if (
+            peer["instrument"] == meta["instrument"]
+            or peer.get("event_ticker") != meta["event_ticker"]
+            or peer.get("source") != meta["source"]
+            or peer.get("status") != "active"
+            or peer.get("close_time") != meta["close_time"]
+        ):
+            continue
         levels = await venue.orderbook(peer["instrument"], market=peer)
+        timestamp = book_timestamp(levels, peer, epoch())
         book = normalize_book({
             **peer, "maker_fee_rate": meta.get("maker_fee_rate"), "taker_fee_rate": meta.get("taker_fee_rate"),
         }, levels)
-        if book is None or not book.valid() or not book.fee_schedule_verified:
+        if book is None or not book.fee_schedule_verified:
             continue
         rules = "|".join((meta["event_ticker"], meta["instrument"], peer["instrument"],
                           meta["rules_primary"], peer["rules_primary"], str(meta["rules_secondary"])))
         return Relation(
             peer["instrument"], "MUTUALLY_EXCLUSIVE", True, book,
-            int(levels["observed_at"]), sha256(rules.encode()).hexdigest(),
+            timestamp, sha256(rules.encode()).hexdigest(),
         )
     return None
 
@@ -148,27 +187,55 @@ async def discover_relation(venue: Kalshi, meta: dict) -> Relation | None:
 async def kalshi_observation(instrument: str, *, demo: bool, scanner: bool = False) -> Market:
     venue = Kalshi(public=not demo)
     meta, rows = await asyncio.gather(venue.market(instrument), venue.candles(instrument, 300, 120))
+    expected_source = "KALSHI_DEMO" if demo else "KALSHI_PUBLIC"
+    if (
+        not isinstance(meta, dict) or meta.get("instrument") != instrument
+        or meta.get("source") != expected_source
+        or not isinstance(meta.get("event_ticker"), str) or not meta["event_ticker"]
+        or type(meta.get("close_time")) is not int
+        or meta["close_time"] < 0
+    ):
+        raise ValueError("INVALID_MARKET_CONTEXT")
     now = epoch()
     outcome = None
-    if meta.get("status") in {"finalized", "settled"} or meta.get("settled_at") is not None:
+    settled = meta.get("status") in {"finalized", "settled"} or meta.get("settled_at") is not None
+    if settled:
         outcome = {"YES": True, "NO": False}.get(meta.get("result"))
-    levels = await venue.orderbook(instrument, market=meta) if meta.get("status") == "active" else {}
+    book = None
     relation = None
-    if scanner and levels:
-        try:
-            relation = await discover_relation(venue, meta)
-            # Confirm primary executable depth after the peer observation.
+    timestamp = now
+    if meta.get("status") == "active" and not settled and now < meta["close_time"]:
+        levels = await venue.orderbook(instrument, market=meta)
+        timestamp = book_timestamp(levels, meta, epoch())
+        book = normalize_book(meta, levels)
+        if scanner and book is not None:
+            try:
+                relation = await discover_relation(venue, meta)
+            except (VenueError, ValueError, TypeError, KeyError):
+                relation = None
+            # Refresh even after failed peer discovery; never reuse old depth
+            # if this second read fails or returns an incompatible observation.
             levels = await venue.orderbook(instrument, market=meta)
-        except (VenueError, ValueError, TypeError, KeyError):
+            timestamp = book_timestamp(levels, meta, epoch())
+            book = normalize_book(meta, levels)
+        observed_at = epoch()
+        if not 0 <= observed_at - timestamp <= BOOK_MAX_AGE:
+            raise ValueError("STALE_MARKET_DATA")
+        if observed_at >= meta["close_time"]:
+            book, relation = None, None
+        if relation is not None and (
+            book is None or not 0 <= timestamp - relation.observed_at <= BOOK_MAX_AGE
+            or not 0 <= observed_at - relation.observed_at <= BOOK_MAX_AGE
+        ):
             relation = None
     source = "KALSHI_OFFICIAL_DEMO_MARKET" if demo else "KALSHI_OFFICIAL_PUBLIC"
     return Market(
-        "KALSHI", instrument, meta.get("event_ticker") or instrument,
-        int(levels.get("observed_at", now)), source, closed_candles(rows, 300, now),
-        book=normalize_book(meta, levels), outcome=outcome, relation=relation,
+        "KALSHI", instrument, meta["event_ticker"], timestamp, source,
+        closed_candles(rows, 300, timestamp), book=book, outcome=outcome, relation=relation,
         rules_id=relation.rules_id if relation else "",
-        closes_at=meta.get("close_time"),
+        closes_at=meta["close_time"],
     )
+
 
 async def observe(mode: str, exchange: str, instrument: str, cursor: int, parameters: dict, *, strategy: str = "") -> Market | None:
     if fixture_enabled(mode, exchange, instrument):
