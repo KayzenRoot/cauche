@@ -330,8 +330,6 @@ def kalshi_fill_snapshot(db: Session, order: Order, rows: list, *, reported: Dec
     # before it can open another order.
     if total > reported or costs > fee or (total == reported and costs != fee):
         raise ValueError("INVALID_KALSHI_RECONCILIATION")
-    if total < reported:
-        raise VenueError("KALSHI_RECONCILIATION_INCOMPLETE", retryable=True)
 
     existing = db.scalars(select(Fill).where(Fill.order_id == order.id)).all()
     booked = {}
@@ -367,6 +365,10 @@ def kalshi_fill_snapshot(db: Session, order: Order, rows: list, *, reported: Dec
         Fill.broker_id.in_(list(normalized)), Fill.order_id != order.id,
     ).limit(1)) is not None:
         raise ValueError("INVALID_KALSHI_RECONCILIATION")
+    # A missing or changed booked fill is an integrity error, not a
+    # transient delay in the publication of previously unbooked fills.
+    if total < reported:
+        raise VenueError("KALSHI_RECONCILIATION_INCOMPLETE", retryable=True)
     latest = max((int(row[3].timestamp()) for row in normalized.values()), default=earliest)
     return {key: row for key, row in normalized.items() if key not in booked}, total, exposure, costs, latest
 

@@ -13,3 +13,6 @@ Proof obligations: rollback de snapshot inválido em SQLite/PostgreSQL; parcial,
 
 ## Evidence Bundle preliminar
 NOT_TESTED até logs do novo SHA. Sem nova infraestrutura ou alteração de contratos externos. A política de taxas e resolução agregada ainda requer validação oficial independente; não afirmar que o saldo remoto foi reconciliado. Checkpoint não promovido.
+
+## Correction CD-06/R01
+CI 45433123102, HEAD 3c68d1c2dd573d856810efb9add389c419edc546: 328 PASS, 2 FAIL, um em cada banco, em test_kalshi_existing_ledger_is_not_overwritten[missing-fill]. Causa: classificação retryable antes de validar fills já contabilizados. Corrigir precedência: divergência de ledger tem prioridade sobre atraso transitório; somente ausência de fills ainda não contabilizados pode gerar INCOMPLETE retryable. Nenhum teste alterado/removido. Reexecutar CI completo e auditar novo HEAD antes de aprovação. Cobertura do run reprovado (não baseline aprovado): demo_execution 91%, backend 81% statements. Bandit/pip-audit não executados após falha pytest. Checkpoint não promovido.
