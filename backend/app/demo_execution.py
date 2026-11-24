@@ -446,15 +446,50 @@ async def reconcile_kalshi(db: Session, order: Order, venue: Kalshi, *, cancel: 
         gross, payout, timestamp = settlement
         record_settlement(db, order, gross=gross, payout=payout, timestamp=timestamp)
 
+def reconciliation_scope(row) -> tuple:
+    return row.run_id, row.mode, row.exchange, row.strategy, row.instrument
+
+
+def reconciliation_orders(db: Session, bot: Bot) -> list[Order]:
+    orders = db.scalars(select(Order).where(
+        Order.run_id == bot.run_id, Order.status != "SETTLED",
+    ).order_by(Order.id)).all()
+    expected = reconciliation_scope(bot)
+    for order in orders:
+        intent = db.get(OrderIntent, order.intent_id)
+        if (
+            reconciliation_scope(order) != expected or order.id != order.intent_id
+            or order.source != BROKER_SOURCE or order.currency != "USD"
+            or not isinstance(order.broker_id, str) or not order.broker_id
+            or order.broker_id != order.broker_id.strip() or len(order.broker_id) > 100
+            or intent is None or reconciliation_scope(intent) != expected
+            or intent.status != "CONFIRMED"
+        ):
+            raise ValueError("INVALID_RECONCILIATION_CONTEXT")
+    return orders
+
+
 async def reconcile(db: Session, bot: Bot, venue, *, cancel: bool) -> None:
+    if (
+        bot.mode != "BROKER_DEMO" or not bot.run_id
+        or not ((bot.exchange == "DERIV" and isinstance(venue, Deriv))
+                or (bot.exchange == "KALSHI" and isinstance(venue, Kalshi)))
+    ):
+        raise ValueError("INVALID_RECONCILIATION_CONTEXT")
     pending = db.scalars(select(OrderIntent).where(
         OrderIntent.run_id == bot.run_id, OrderIntent.status.in_(("UNKNOWN", "SUBMITTING")),
-    )).all()
+    ).order_by(OrderIntent.id)).all()
+    expected = reconciliation_scope(bot)
+    # Validate every candidate before performing even the first remote operation.
+    for intent in pending:
+        if reconciliation_scope(intent) != expected or db.get(Order, intent.id) is not None:
+            raise ValueError("INVALID_RECONCILIATION_CONTEXT")
+    orders = reconciliation_orders(db, bot)
     for intent in pending:
         await recover_claim(db, bot, venue, intent)
-    orders = db.scalars(select(Order).where(
-        Order.run_id == bot.run_id, Order.broker_id.is_not(None), Order.status != "SETTLED",
-    )).all()
+    if pending:
+        # Recovery may have created a new order; validate that order as well.
+        orders = reconciliation_orders(db, bot)
     for order in orders:
         if isinstance(venue, Deriv):
             await reconcile_deriv(db, order, venue)

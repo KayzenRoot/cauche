@@ -15,7 +15,7 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 from app import demo_execution, worker
 from app.db import Base, utcnow
 from app.domain import Decision
-from app.integrations import Kalshi, VenueError
+from app.integrations import Deriv, Kalshi, VenueError
 from app.models import (
     Bot, ExchangeConnection, Fee, Fill, Order, OrderIntent, Position, RiskConfig, Settlement, Signal,
     StrategyConfig, StrategyRun, SystemEvent,
@@ -691,3 +691,139 @@ async def test_worker_missing_live_observation_does_not_expire_replay(recovery_d
         assert bot.state == "DISCONNECTED" and bot.last_error == "STALE_MARKET_DATA"
         assert db.get(StrategyRun, bot.run_id).finished_at is None
         assert db.scalar(select(func.count()).select_from(OrderIntent)) == 0
+
+
+# CD-09: preflight every current-run reconciliation candidate before remote I/O.
+@pytest.mark.parametrize("kind", ["mode", "exchange", "strategy", "instrument"])
+async def test_reconciliation_rejects_wrong_claim_scope(recovery_db, venue, kind):
+    seed_claim(recovery_db, status="UNKNOWN")
+    values = {"mode": "PAPER", "exchange": "DERIV", "strategy": "KALSHI-STRAT-02", "instrument": "OTHER"}
+    with recovery_db.begin() as db:
+        setattr(db.get(OrderIntent, "claim-fixture"), kind, values[kind])
+    assert await worker.step() == worker.MARKET_TICK
+    venue.find_demo_order.assert_not_awaited()
+    venue.reconcile_demo.assert_not_awaited()
+    venue.cancel_demo.assert_not_awaited()
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        assert db.get(OrderIntent, "claim-fixture").status == "UNKNOWN"
+        bot = db.get(Bot, 1)
+        assert bot.desired_state == "PAUSED" and bot.state in {"RISK_BLOCKED", "ERROR"}
+        assert bot.last_error == "INVALID_CONFIGURATION_OR_SOURCE"
+        assert db.scalar(select(func.count()).select_from(Order)) == 0
+
+
+@pytest.mark.parametrize("kind", [
+    "mode", "exchange", "strategy", "instrument", "source", "currency", "broker-missing",
+    "broker-blank", "broker-whitespace", "intent-scope", "intent-state",
+])
+async def test_reconciliation_rejects_wrong_order_scope_before_remote(recovery_db, venue, kind):
+    seed_kalshi_order(recovery_db)
+    values = {
+        "mode": "PAPER", "exchange": "DERIV", "strategy": "KALSHI-STRAT-02", "instrument": "OTHER",
+        "source": "SIMULATED_FIXTURE", "currency": "EUR",
+    }
+    with recovery_db.begin() as db:
+        order = db.get(Order, "claim-fixture")
+        if kind in values:
+            setattr(order, kind, values[kind])
+        elif kind.startswith("broker-"):
+            order.broker_id = {"broker-missing": None, "broker-blank": "", "broker-whitespace": " broker"}[kind]
+        elif kind == "intent-scope":
+            db.get(OrderIntent, order.intent_id).instrument = "OTHER"
+        else:
+            db.get(OrderIntent, order.intent_id).status = "REJECTED"
+    with pytest.raises(ValueError, match="INVALID_RECONCILIATION_CONTEXT"):
+        with recovery_db.begin() as db:
+            await demo_execution.reconcile(db, db.get(Bot, 1), venue, cancel=True)
+    venue.find_demo_order.assert_not_awaited()
+    venue.reconcile_demo.assert_not_awaited()
+    venue.cancel_demo.assert_not_awaited()
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        assert db.get(Order, "claim-fixture").status == "OPEN"
+        assert db.scalar(select(func.count()).select_from(Fill)) == 0
+
+
+@pytest.mark.parametrize("kind", ["wrong-adapter", "unknown-adapter", "paper", "no-run"])
+async def test_reconciliation_rejects_invalid_router(recovery_db, venue, kind):
+    with recovery_db.begin() as db:
+        bot = db.get(Bot, 1)
+        selected = venue
+        if kind == "wrong-adapter":
+            selected = Mock(spec=Deriv)
+        elif kind == "unknown-adapter":
+            selected = Mock()
+        elif kind == "paper":
+            bot.mode = "PAPER"
+        else:
+            bot.run_id = None
+        with pytest.raises(ValueError, match="INVALID_RECONCILIATION_CONTEXT"):
+            await demo_execution.reconcile(db, bot, selected, cancel=True)
+    venue.find_demo_order.assert_not_awaited()
+    venue.reconcile_demo.assert_not_awaited()
+    venue.cancel_demo.assert_not_awaited()
+
+
+async def test_reconciliation_checks_all_orders_before_recovering_valid_claim(recovery_db, venue):
+    seed_kalshi_order(recovery_db)
+    with recovery_db.begin() as db:
+        db.get(Order, "claim-fixture").instrument = "OTHER"
+        original = db.get(OrderIntent, "claim-fixture")
+        db.add(OrderIntent(
+            id="pending-other", signal_id=original.signal_id, mode=original.mode,
+            exchange=original.exchange, strategy=original.strategy, instrument=original.instrument,
+            run_id=original.run_id, status="UNKNOWN", request=original.request, risk=original.risk,
+        ))
+    with pytest.raises(ValueError, match="INVALID_RECONCILIATION_CONTEXT"):
+        with recovery_db.begin() as db:
+            await demo_execution.reconcile(db, db.get(Bot, 1), venue, cancel=True)
+    venue.find_demo_order.assert_not_awaited()
+    venue.reconcile_demo.assert_not_awaited()
+    venue.cancel_demo.assert_not_awaited()
+    with recovery_db() as db:
+        assert db.get(OrderIntent, "pending-other").status == "UNKNOWN"
+
+
+async def test_reconciliation_ignores_terminal_cancelled_kalshi_order(recovery_db, venue):
+    seed_claim(recovery_db)
+    with recovery_db.begin() as db:
+        demo_execution.acknowledge(db, db.get(OrderIntent, "claim-fixture"), recovered_ack())
+        await demo_execution.reconcile(db, db.get(Bot, 1), venue, cancel=True)
+    venue.find_demo_order.assert_not_awaited()
+    venue.reconcile_demo.assert_not_awaited()
+    venue.cancel_demo.assert_not_awaited()
+
+
+async def test_reconciliation_valid_deriv_route_is_read_only(recovery_db):
+    with recovery_db.begin() as db:
+        bot = db.get(Bot, 1)
+        bot.exchange, bot.strategy, bot.instrument = "DERIV", "DERIV-STRAT-01", "EUR/USD"
+        decision = Decision(strategy=bot.strategy, version="1", reason="TEST", side="CALL",
+                            price=Decimal("1"), quantity=Decimal("1"), exposure=Decimal("1"),
+                            orderable=True, instrument=bot.instrument)
+        fields = dict(mode=bot.mode, exchange=bot.exchange, strategy=bot.strategy,
+                      instrument=bot.instrument, run_id=bot.run_id, timestamp=utcnow())
+        db.add(Signal(id="deriv-router-signal", direction="CALL", reason="TEST", **fields))
+        db.flush()
+        intent = OrderIntent(id="deriv-router-intent", signal_id="deriv-router-signal",
+                             status="SUBMITTING", request={"decision": decision.as_dict()}, **fields)
+        db.add(intent)
+        db.flush()
+        demo_execution.acknowledge(db, intent, {
+            "source": "DERIV_DEMO", "client_order_id": intent.id, "broker_id": "123",
+            "status": "OPEN", "currency": "USD", "price": Decimal("1"), "quantity": Decimal("1"),
+        })
+    venue = Mock(spec=Deriv)
+    venue.reconcile_demo = AsyncMock(return_value={
+        "source": "DERIV_DEMO", "broker_id": "123", "status": "OPEN", "currency": "USD", "price": Decimal("1"),
+    })
+    venue.submit_demo = AsyncMock()
+    with recovery_db.begin() as db:
+        await demo_execution.reconcile(db, db.get(Bot, 1), venue, cancel=True)
+    venue.reconcile_demo.assert_awaited_once_with("123")
+    venue.submit_demo.assert_not_awaited()
+    with recovery_db() as db:
+        assert db.get(Order, "deriv-router-intent").status == "OPEN"
+        assert db.scalar(select(func.count()).select_from(Fill)) == 1
+        assert db.scalar(select(func.count()).select_from(Settlement)) == 0
