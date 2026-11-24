@@ -11,6 +11,7 @@ from .execution import amount, emit, moment, new_order, record_fill, record_sett
 from .integrations import Deriv, Kalshi, VenueError
 from .market_data import deriv_symbol
 from .models import Bot, ExchangeConnection, Order, OrderIntent, Position, RiskConfig, StrategyConfig
+from .quant.types import decimal
 from .security import decrypt_credentials
 
 ZERO = Decimal("0")
@@ -37,7 +38,25 @@ async def has_unmanaged_exposure(venue) -> bool:
     )
 
 
+def confirmation_amount(value, *, stored: bool = True) -> Decimal:
+    """Validate normalized exact amounts before any accounting mutation."""
+    if isinstance(value, bool) or not isinstance(value, (Decimal, str, int)):
+        raise ValueError("INVALID_BROKER_CONFIRMATION")
+    try:
+        number = decimal(value)
+    except ValueError:
+        raise ValueError("INVALID_BROKER_CONFIRMATION") from None
+    # MONEY columns use Numeric(24, 8). Reject rather than silently round.
+    if number < ZERO or (stored and (
+        number >= Decimal("1e16") or number != number.quantize(Decimal("0.00000001"))
+    )):
+        raise ValueError("INVALID_BROKER_CONFIRMATION")
+    return number
+
+
 def acknowledge(db: Session, intent: OrderIntent, result: dict) -> Order:
+    if not isinstance(result, dict):
+        raise ValueError("INVALID_BROKER_CONFIRMATION")
     broker_id = result.get("broker_id")
     broker_status = result.get("status")
     if (
@@ -54,15 +73,48 @@ def acknowledge(db: Session, intent: OrderIntent, result: dict) -> Order:
     # Do not create an unconditional fill for any other state.
     if intent.exchange == "DERIV" and state != "OPEN":
         raise ValueError("INVALID_BROKER_CONFIRMATION")
-    price = amount(result.get("price"), decision.price)
-    remaining = amount(result.get("remaining_quantity"))
-    if price <= ZERO or remaining < ZERO or remaining > decision.quantity:
+    if (
+        intent.exchange not in {"DERIV", "KALSHI"}
+        or result.get("source") != f"{intent.exchange}_DEMO"
+        or result.get("client_order_id") != intent.id
+    ):
         raise ValueError("INVALID_BROKER_CONFIRMATION")
-    if intent.exchange == "DERIV" and result.get("currency") != "USD":
-        raise ValueError("UNSUPPORTED_CURRENCY")
+    price = confirmation_amount(result.get("price"))
+    quantity = confirmation_amount(result.get("quantity"))
+    if not ZERO < price <= decision.price or quantity != decision.quantity or quantity <= ZERO:
+        raise ValueError("INVALID_BROKER_CONFIRMATION")
+    if intent.exchange == "DERIV":
+        if result.get("currency") != "USD":
+            raise ValueError("UNSUPPORTED_CURRENCY")
+        remaining = confirmation_amount(result.get("remaining_quantity", ZERO))
+        filled = confirmation_amount(result.get("filled_quantity", Decimal("1")))
+        fee = confirmation_amount(result.get("fee", ZERO))
+        if quantity != 1 or filled != 1 or remaining != ZERO:
+            raise ValueError("INVALID_BROKER_CONFIRMATION")
+    else:
+        if (
+            result.get("instrument") != intent.instrument or result.get("side") != decision.side
+            or price >= 1
+        ):
+            raise ValueError("INVALID_BROKER_CONFIRMATION")
+        remaining = confirmation_amount(result.get("remaining_quantity"))
+        filled = confirmation_amount(result.get("filled_quantity"))
+        fee = confirmation_amount(result.get("fee"), stored=False)
+        if filled + remaining > quantity:
+            raise ValueError("INVALID_BROKER_CONFIRMATION")
+        if state in {"OPEN", "ACCEPTED"}:
+            consistent = filled == ZERO and remaining > ZERO
+        elif state == "PARTIAL":
+            consistent = ZERO < filled < quantity
+        elif state == "FILLED":
+            consistent = filled == quantity and remaining == ZERO
+        else:
+            consistent = filled == ZERO and remaining == ZERO
+        if not consistent:
+            raise ValueError("INVALID_BROKER_CONFIRMATION")
     order = new_order(
         db, intent, decision, status=state, source=BROKER_SOURCE, broker_id=broker_id,
-        price=price, remaining=remaining, meta={"reported_filled": str(result.get("filled_quantity", ZERO))},
+        price=price, remaining=remaining, meta={"reported_filled": str(filled)},
     )
     intent.status = "CONFIRMED"
     intent.response = {"broker_id": broker_id, "status": state, "source": BROKER_SOURCE}
@@ -71,7 +123,7 @@ def acknowledge(db: Session, intent: OrderIntent, result: dict) -> Order:
     if intent.exchange == "DERIV":
         record_fill(
             db, order, key=broker_id, broker_id=broker_id, quantity=Decimal("1"),
-            price=price, fee=amount(result.get("fee")), timestamp=utcnow(),
+            price=price, fee=fee, timestamp=utcnow(),
         )
     return order
 
